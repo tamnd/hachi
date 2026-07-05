@@ -61,10 +61,10 @@ type model struct {
 	working  bool
 	steering bool // turn stopped by esc, next send resumes
 	started  time.Time
-	verb     string      // this turn's working verb
-	tokens   waggle.Cost // settled usage, accumulated across turns
-	live     waggle.Cost // running usage of the current turn, replaced by pulses
-	expanded bool        // tool output expanded
+	verb     string       // this turn's working verb
+	tokens   waggle.Cost  // settled usage, accumulated across turns
+	pulse    waggle.Pulse // the brain's live vitals, each pulse replaces the last
+	expanded bool         // tool output expanded
 	errText  string
 	watch    <-chan waggle.Event
 	cancel   context.CancelFunc
@@ -238,7 +238,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.steering = false
 		m.started = time.Now()
 		m.verb = pickVerb(m.started)
-		m.live = waggle.Cost{}
+		m.pulse.Usage = waggle.Cost{}
 		m.errText = ""
 		return m, tick()
 
@@ -384,7 +384,7 @@ func (m *model) resetTranscript() {
 	m.byRef = map[string]int{}
 	m.lastSeq = 0
 	m.tokens = waggle.Cost{}
-	m.live = waggle.Cost{}
+	m.pulse = waggle.Pulse{}
 	m.errText = ""
 	m.working = false
 	m.steering = false
@@ -405,29 +405,35 @@ func (m *model) apply(ev waggle.Event) {
 	}
 	m.lastSeq = ev.Seq
 	switch ev.Kind {
+	case waggle.KindPulse:
+		// A pulse carries the whole picture so far; replace, never add.
+		if p, ok := decode[waggle.Pulse](ev.Data); ok {
+			m.pulse = p
+		}
+		return
 	case waggle.KindCost:
 		if c, ok := decode[waggle.Cost](ev.Data); ok {
 			if c.Live {
-				// A pulse carries the whole turn so far; replace, never add.
-				m.live = c
+				// Older journals carried live snapshots as costs.
+				m.pulse.Usage = c
 				return
 			}
 			m.tokens.InputTokens += c.InputTokens
 			m.tokens.CachedInputTokens += c.CachedInputTokens
 			m.tokens.OutputTokens += c.OutputTokens
 			m.tokens.ReasoningTokens += c.ReasoningTokens
-			m.live = waggle.Cost{}
+			m.pulse.Usage = waggle.Cost{}
 		}
 		return
 	case waggle.KindResult:
 		m.working = false
-		m.live = waggle.Cost{}
+		m.pulse.Usage = waggle.Cost{}
 		m.finishRunningCards()
 		m.refresh(m.vp.AtBottom())
 		return
 	case waggle.KindDied:
 		m.working = false
-		m.live = waggle.Cost{}
+		m.pulse.Usage = waggle.Cost{}
 	case waggle.KindMessage:
 		if ev.Bee == "human" {
 			m.working = true
@@ -580,7 +586,7 @@ func (m *model) viewActivity() string {
 	case m.working:
 		s := " " + m.spin.View() + " " + m.th.Brain.Render(m.verb+"…")
 		parts := []string{time.Since(m.started).Round(time.Second).String()}
-		if out := m.live.OutputTokens + m.live.ReasoningTokens; out > 0 {
+		if out := m.pulse.Usage.OutputTokens + m.pulse.Usage.ReasoningTokens; out > 0 {
 			parts = append(parts, "↓ "+compact(out)+" tokens")
 		}
 		parts = append(parts, "esc to interrupt")
@@ -625,11 +631,11 @@ func (m *model) viewStatus() string {
 	default:
 		left = " " + m.th.Faint.Render("○") + m.th.StatusBar.Render(" idle")
 	}
-	in := m.tokens.InputTokens + m.live.InputTokens
-	out := m.tokens.OutputTokens + m.tokens.ReasoningTokens + m.live.OutputTokens + m.live.ReasoningTokens
+	in := m.tokens.InputTokens + m.pulse.Usage.InputTokens
+	out := m.tokens.OutputTokens + m.tokens.ReasoningTokens + m.pulse.Usage.OutputTokens + m.pulse.Usage.ReasoningTokens
 	if in+out > 0 {
 		left += m.th.StatusBar.Render(fmt.Sprintf("  ·  ↑ %s ↓ %s", compact(in), compact(out)))
-		if cached := m.tokens.CachedInputTokens + m.live.CachedInputTokens; cached > 0 && in > 0 {
+		if cached := m.tokens.CachedInputTokens + m.pulse.Usage.CachedInputTokens; cached > 0 && in > 0 {
 			left += m.th.StatusBar.Render(fmt.Sprintf(" · %d%% cached", cached*100/in))
 		}
 	}
@@ -638,11 +644,51 @@ func (m *model) viewStatus() string {
 		m.th.StatusKey.Render("^o") + m.th.Faint.Render(" expand  ") +
 		m.th.StatusKey.Render("^l") + m.th.Faint.Render(" sessions  ") +
 		m.th.StatusKey.Render("^c") + m.th.Faint.Render(" quit ")
-	gap := m.w - lipgloss.Width(left) - lipgloss.Width(help)
-	if gap < 1 {
-		return left
+	right := help
+	if v := m.viewVitals(); v != "" &&
+		m.w-lipgloss.Width(left)-lipgloss.Width(v)-lipgloss.Width(help)-3 >= 1 {
+		right = v + m.th.Faint.Render("  ·  ") + help
 	}
-	return left + strings.Repeat(" ", gap) + help
+	gap := m.w - lipgloss.Width(left) - lipgloss.Width(right)
+	if gap < 1 {
+		gap = m.w - lipgloss.Width(left) - lipgloss.Width(help)
+		if gap < 1 {
+			return left
+		}
+		right = help
+	}
+	return left + strings.Repeat(" ", gap) + right
+}
+
+// viewVitals is the brain's health readout on the status bar: which model
+// is thinking at what effort, how full its context window is, and how much
+// of the plan's rate limits the hive has eaten. All of it comes from
+// pulses, so a brain that reports nothing shows nothing.
+func (m *model) viewVitals() string {
+	var parts []string
+	if m.pulse.Model != "" {
+		s := m.pulse.Model
+		if m.pulse.Effort != "" {
+			s += " " + m.pulse.Effort
+		}
+		parts = append(parts, m.th.StatusBar.Render(s))
+	}
+	if m.pulse.Window > 0 && m.pulse.Context > 0 {
+		pct := m.pulse.Context * 100 / m.pulse.Window
+		parts = append(parts, meter(m.th, fmt.Sprintf("%d%% context", pct), float64(pct)))
+	}
+	for _, l := range m.pulse.Limits {
+		parts = append(parts, meter(m.th, fmt.Sprintf("%s %.0f%%", l.Name, l.UsedPct), l.UsedPct))
+	}
+	return strings.Join(parts, m.th.Faint.Render(" · "))
+}
+
+// meter renders a usage figure, turning red once it is nearly spent.
+func meter(t theme, s string, pct float64) string {
+	if pct >= 80 {
+		return t.ToolBad.Render(s)
+	}
+	return t.StatusBar.Render(s)
 }
 
 func (m *model) viewList() string {

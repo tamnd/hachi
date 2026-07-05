@@ -1,15 +1,18 @@
 package codex
 
-// Live token pulse. codex exec --json reports usage only at turn end, but
-// the CLI appends a token_count line to its rollout log after every model
-// call. Tailing that log is what lets a client show tokens arriving while
-// the turn runs. Everything here is best effort: no rollout file means no
-// pulses, never a failed turn.
+// Rollout vitals. codex exec --json reports usage only at turn end, but
+// the CLI keeps a rollout log under ~/.codex/sessions and appends to it
+// after every model call: token counts, how full the context window is,
+// the subscription's rate-limit meters, and the model and effort the turn
+// runs with. Tailing that log is what lets a client show live vitals
+// while the turn works. Everything here is best effort: no rollout file
+// means no pulses, never a failed turn.
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"time"
@@ -53,27 +56,43 @@ func findRollout(ctx context.Context, root, thread string) string {
 	return ""
 }
 
+// rolloutLine covers the rollout lines the tail cares about: turn_context
+// rows carry the model and effort, token_count rows carry usage, the
+// context window, and rate limits.
 type rolloutLine struct {
 	Type    string `json:"type"`
 	Payload struct {
-		Type string `json:"type"`
-		Info struct {
-			Last struct {
+		Type   string `json:"type"`
+		Model  string `json:"model"`
+		Effort string `json:"effort"`
+		Info   struct {
+			Window int64 `json:"model_context_window"`
+			Last   struct {
 				Input     int64 `json:"input_tokens"`
 				Cached    int64 `json:"cached_input_tokens"`
 				Output    int64 `json:"output_tokens"`
 				Reasoning int64 `json:"reasoning_output_tokens"`
 			} `json:"last_token_usage"`
 		} `json:"info"`
+		RateLimits struct {
+			Primary   *rolloutWindow `json:"primary"`
+			Secondary *rolloutWindow `json:"secondary"`
+		} `json:"rate_limits"`
 	} `json:"payload"`
 }
 
-// tailTokens follows the rollout log and calls emit with the turn's usage
-// so far each time codex records another model call. A fresh thread reads
-// the file from the start (everything in it belongs to this turn); a
-// resumed one starts at the current end so old turns are not recounted.
-// Returns when ctx is canceled.
-func tailTokens(ctx context.Context, root, thread string, fromStart bool, emit func(waggle.Cost)) {
+type rolloutWindow struct {
+	UsedPercent   float64 `json:"used_percent"`
+	WindowMinutes int64   `json:"window_minutes"`
+	ResetsAt      int64   `json:"resets_at"`
+}
+
+// tailRollout follows the rollout log and calls emit with the brain's
+// vitals each time codex records more. A fresh thread reads the file from
+// the start (everything in it belongs to this turn); a resumed one starts
+// at the current end so old turns are not recounted. Returns when ctx is
+// canceled.
+func tailRollout(ctx context.Context, root, thread string, fromStart bool, emit func(waggle.Pulse)) {
 	path := findRollout(ctx, root, thread)
 	if path == "" {
 		return
@@ -91,7 +110,7 @@ func tailTokens(ctx context.Context, root, thread string, fromStart bool, emit f
 		}
 	}
 
-	var sum waggle.Cost
+	var p waggle.Pulse
 	var pending []byte
 	chunk := make([]byte, 256*1024)
 	for {
@@ -106,6 +125,7 @@ func tailTokens(ctx context.Context, root, thread string, fromStart bool, emit f
 		}
 		off += int64(n)
 		pending = append(pending, chunk[:n]...)
+		changed := false
 		for {
 			i := bytes.IndexByte(pending, '\n')
 			if i < 0 {
@@ -117,20 +137,80 @@ func tailTokens(ctx context.Context, root, thread string, fromStart bool, emit f
 			if json.Unmarshal(line, &rl) != nil {
 				continue
 			}
-			if rl.Type != "event_msg" || rl.Payload.Type != "token_count" {
-				continue
+			if fold(&p, rl) {
+				changed = true
 			}
-			u := rl.Payload.Info.Last
-			if u.Input+u.Cached+u.Output+u.Reasoning == 0 {
-				continue
-			}
-			sum.InputTokens += u.Input
-			sum.CachedInputTokens += u.Cached
-			sum.OutputTokens += u.Output
-			sum.ReasoningTokens += u.Reasoning
-			snap := sum
-			snap.Live = true
-			emit(snap)
 		}
+		if changed {
+			emit(p)
+		}
+	}
+}
+
+// fold merges one rollout line into the vitals and reports whether it
+// carried anything new.
+func fold(p *waggle.Pulse, rl rolloutLine) bool {
+	switch {
+	case rl.Type == "turn_context":
+		if rl.Payload.Model == "" {
+			return false
+		}
+		if rl.Payload.Model == p.Model && rl.Payload.Effort == p.Effort {
+			return false
+		}
+		p.Model, p.Effort = rl.Payload.Model, rl.Payload.Effort
+		return true
+
+	case rl.Type == "event_msg" && rl.Payload.Type == "token_count":
+		changed := false
+		if w := rl.Payload.Info.Window; w > 0 && w != p.Window {
+			p.Window = w
+			changed = true
+		}
+		u := rl.Payload.Info.Last
+		if u.Input+u.Cached+u.Output+u.Reasoning > 0 {
+			p.Usage.InputTokens += u.Input
+			p.Usage.CachedInputTokens += u.Cached
+			p.Usage.OutputTokens += u.Output
+			p.Usage.ReasoningTokens += u.Reasoning
+			// The latest call's input plus output is what sits in the
+			// window for the next call.
+			p.Context = u.Input + u.Output
+			changed = true
+		}
+		var lims []waggle.Limit
+		for _, w := range []*rolloutWindow{rl.Payload.RateLimits.Primary, rl.Payload.RateLimits.Secondary} {
+			if w == nil {
+				continue
+			}
+			l := waggle.Limit{Name: limitName(w.WindowMinutes), UsedPct: w.UsedPercent}
+			if w.ResetsAt > 0 {
+				l.ResetsAt = time.Unix(w.ResetsAt, 0)
+			}
+			lims = append(lims, l)
+		}
+		if len(lims) > 0 {
+			p.Limits = lims
+			changed = true
+		}
+		return changed
+	}
+	return false
+}
+
+// limitName turns a rate-limit window length into the label a human would
+// use for it: codex's 300 minute window reads "5h", 10080 reads "week".
+func limitName(mins int64) string {
+	switch {
+	case mins <= 0:
+		return "limit"
+	case mins == 10080:
+		return "week"
+	case mins%1440 == 0:
+		return fmt.Sprintf("%dd", mins/1440)
+	case mins%60 == 0:
+		return fmt.Sprintf("%dh", mins/60)
+	default:
+		return fmt.Sprintf("%dm", mins)
 	}
 }
