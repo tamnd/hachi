@@ -299,7 +299,7 @@ func (m *model) key(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "ctrl+o":
 		m.expanded = !m.expanded
-		m.unfreezeTools()
+		m.unfreezeClipped()
 		m.refresh(m.vp.AtBottom())
 		return m, nil
 	case "pgup":
@@ -488,9 +488,11 @@ func (m *model) finishRunningCards() {
 	}
 }
 
-func (m *model) unfreezeTools() {
+// unfreezeClipped re-renders every card whose body clips: tool output and
+// edit diffs both honor the expand toggle.
+func (m *model) unfreezeClipped() {
 	for _, it := range m.items {
-		if it.ev.Kind == waggle.KindTool {
+		if it.ev.Kind == waggle.KindTool || it.ev.Kind == waggle.KindEdit {
 			it.frozen = false
 		}
 	}

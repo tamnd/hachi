@@ -82,10 +82,13 @@ type Tool struct {
 	Status   string `json:"status"` // in_progress | completed | failed
 }
 
-// FileChange is one entry in an Edit payload.
+// FileChange is one entry in an Edit payload. Diff, when the brain
+// reports one, holds unified-diff style lines: hunk headers, context, and
+// +/- changes. New files show their content as all additions.
 type FileChange struct {
 	Path string `json:"path"`
 	Op   string `json:"op"` // add | update | delete
+	Diff string `json:"diff,omitempty"`
 }
 
 // Edit is the payload for KindEdit. Ref works as in Tool.
