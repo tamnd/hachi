@@ -64,7 +64,7 @@ type model struct {
 	verb     string      // this turn's working verb
 	tokens   waggle.Cost // settled usage, accumulated across turns
 	live     waggle.Cost // running usage of the current turn, replaced by pulses
-	expanded bool // tool output expanded
+	expanded bool        // tool output expanded
 	errText  string
 	watch    <-chan waggle.Event
 	cancel   context.CancelFunc
