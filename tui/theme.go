@@ -1,57 +1,87 @@
 package tui
 
-import "github.com/charmbracelet/lipgloss"
+import (
+	"image/color"
 
-// theme groups every style the TUI uses. Colors are adaptive so light and
-// dark terminals both read well.
+	"charm.land/lipgloss/v2"
+)
+
+// theme groups every style the TUI uses. It is built for the terminal's
+// actual background (queried at startup) so light and dark both read well.
 type theme struct {
+	dark bool
+
+	Header    lipgloss.Style
+	HeaderSub lipgloss.Style
+	BrainChip lipgloss.Style
+
+	HumanBar  lipgloss.Style
 	Human     lipgloss.Style
-	HumanTag  lipgloss.Style
 	Finding   lipgloss.Style
 	ToolBox   lipgloss.Style
+	ToolRun   lipgloss.Style
 	ToolCmd   lipgloss.Style
 	ToolOut   lipgloss.Style
 	ToolOK    lipgloss.Style
 	ToolBad   lipgloss.Style
+	ToolDur   lipgloss.Style
 	EditBox   lipgloss.Style
 	EditPath  lipgloss.Style
+	EditAdd   lipgloss.Style
+	EditDel   lipgloss.Style
 	DiedBox   lipgloss.Style
+	Composer  lipgloss.Style
 	StatusBar lipgloss.Style
 	StatusKey lipgloss.Style
 	Brain     lipgloss.Style
 	Faint     lipgloss.Style
 	Title     lipgloss.Style
+	ListBox   lipgloss.Style
 	ListSel   lipgloss.Style
-	ListRow   lipgloss.Style
 	Logo      lipgloss.Style
 }
 
-func newTheme() theme {
-	accent := lipgloss.AdaptiveColor{Light: "#B58900", Dark: "#E6B450"} // honey
-	subtle := lipgloss.AdaptiveColor{Light: "#6C6C6C", Dark: "#8A8A8A"}
-	good := lipgloss.AdaptiveColor{Light: "#2AA198", Dark: "#5AF78E"}
-	bad := lipgloss.AdaptiveColor{Light: "#DC322F", Dark: "#FF5C57"}
-	box := lipgloss.AdaptiveColor{Light: "#DADADA", Dark: "#3A3A3A"}
+func newTheme(dark bool) theme {
+	ld := lipgloss.LightDark(dark)
+	pick := func(light, darkc string) color.Color {
+		return ld(lipgloss.Color(light), lipgloss.Color(darkc))
+	}
+
+	honey := pick("#B58900", "#E6B450")
+	subtle := pick("#767676", "#8A8A8A")
+	good := pick("#2AA198", "#5AF78E")
+	bad := pick("#DC322F", "#FF5C57")
+	box := pick("#D0D0D0", "#3A3A3A")
+	chipFg := pick("#FFFFFF", "#1A1A1A")
 
 	return theme{
+		dark:      dark,
+		Header:    lipgloss.NewStyle().Foreground(honey).Bold(true),
+		HeaderSub: lipgloss.NewStyle().Foreground(subtle),
+		BrainChip: lipgloss.NewStyle().Background(honey).Foreground(chipFg).Padding(0, 1).Bold(true),
+		HumanBar:  lipgloss.NewStyle().Foreground(honey).Bold(true),
 		Human:     lipgloss.NewStyle().Bold(true),
-		HumanTag:  lipgloss.NewStyle().Foreground(accent).Bold(true),
 		Finding:   lipgloss.NewStyle().Foreground(subtle).Italic(true),
 		ToolBox:   lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(box).Padding(0, 1),
+		ToolRun:   lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(honey).Padding(0, 1),
 		ToolCmd:   lipgloss.NewStyle().Bold(true),
 		ToolOut:   lipgloss.NewStyle().Foreground(subtle),
 		ToolOK:    lipgloss.NewStyle().Foreground(good),
 		ToolBad:   lipgloss.NewStyle().Foreground(bad).Bold(true),
-		EditBox:   lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(accent).Padding(0, 1),
-		EditPath:  lipgloss.NewStyle().Foreground(accent),
+		ToolDur:   lipgloss.NewStyle().Foreground(subtle),
+		EditBox:   lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(honey).Padding(0, 1),
+		EditPath:  lipgloss.NewStyle().Foreground(honey),
+		EditAdd:   lipgloss.NewStyle().Foreground(good),
+		EditDel:   lipgloss.NewStyle().Foreground(bad),
 		DiedBox:   lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(bad).Padding(0, 1).Foreground(bad),
+		Composer:  lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(honey).Padding(0, 1),
 		StatusBar: lipgloss.NewStyle().Foreground(subtle),
-		StatusKey: lipgloss.NewStyle().Foreground(accent),
-		Brain:     lipgloss.NewStyle().Foreground(accent).Bold(true),
+		StatusKey: lipgloss.NewStyle().Foreground(honey),
+		Brain:     lipgloss.NewStyle().Foreground(honey).Bold(true),
 		Faint:     lipgloss.NewStyle().Foreground(subtle),
-		Title:     lipgloss.NewStyle().Bold(true).Foreground(accent),
-		ListSel:   lipgloss.NewStyle().Foreground(accent).Bold(true),
-		ListRow:   lipgloss.NewStyle(),
-		Logo:      lipgloss.NewStyle().Foreground(accent).Bold(true),
+		Title:     lipgloss.NewStyle().Bold(true).Foreground(honey),
+		ListBox:   lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(box).Padding(1, 2),
+		ListSel:   lipgloss.NewStyle().Foreground(honey).Bold(true),
+		Logo:      lipgloss.NewStyle().Foreground(honey).Bold(true),
 	}
 }
