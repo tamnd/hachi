@@ -18,14 +18,11 @@ type theme struct {
 	HumanBar  lipgloss.Style
 	Human     lipgloss.Style
 	Finding   lipgloss.Style
-	ToolBox   lipgloss.Style
-	ToolRun   lipgloss.Style
 	ToolCmd   lipgloss.Style
 	ToolOut   lipgloss.Style
 	ToolOK    lipgloss.Style
 	ToolBad   lipgloss.Style
 	ToolDur   lipgloss.Style
-	EditBox   lipgloss.Style
 	EditPath  lipgloss.Style
 	EditAdd   lipgloss.Style
 	EditDel   lipgloss.Style
@@ -62,14 +59,11 @@ func newTheme(dark bool) theme {
 		HumanBar:  lipgloss.NewStyle().Foreground(honey).Bold(true),
 		Human:     lipgloss.NewStyle().Bold(true),
 		Finding:   lipgloss.NewStyle().Foreground(subtle).Italic(true),
-		ToolBox:   lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(box).Padding(0, 1),
-		ToolRun:   lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(honey).Padding(0, 1),
 		ToolCmd:   lipgloss.NewStyle().Bold(true),
 		ToolOut:   lipgloss.NewStyle().Foreground(subtle),
 		ToolOK:    lipgloss.NewStyle().Foreground(good),
 		ToolBad:   lipgloss.NewStyle().Foreground(bad).Bold(true),
 		ToolDur:   lipgloss.NewStyle().Foreground(subtle),
-		EditBox:   lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(honey).Padding(0, 1),
 		EditPath:  lipgloss.NewStyle().Foreground(honey),
 		EditAdd:   lipgloss.NewStyle().Foreground(good),
 		EditDel:   lipgloss.NewStyle().Foreground(bad),
