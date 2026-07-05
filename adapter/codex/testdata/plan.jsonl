@@ -1,0 +1,13 @@
+{"type":"thread.started","thread_id":"019f3299-4707-7942-a55c-078f9ed52324"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"I’m creating a 3-step plan for making tea, then I’ll mark each step complete in sequence as I go."}}
+{"type":"item.started","item":{"id":"item_1","type":"todo_list","items":[{"text":"Boil water","completed":false},{"text":"Steep the tea","completed":false},{"text":"Pour and serve","completed":false}]}}
+{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"The plan is in place. I’m completing the first step now, then I’ll advance the rest one at a time."}}
+{"type":"item.updated","item":{"id":"item_1","type":"todo_list","items":[{"text":"Boil water","completed":true},{"text":"Steep the tea","completed":false},{"text":"Pour and serve","completed":false}]}}
+{"type":"item.completed","item":{"id":"item_3","type":"agent_message","text":"Water is boiled. I’m marking the steeping step in progress and then closing out with serving."}}
+{"type":"item.updated","item":{"id":"item_1","type":"todo_list","items":[{"text":"Boil water","completed":true},{"text":"Steep the tea","completed":true},{"text":"Pour and serve","completed":false}]}}
+{"type":"item.completed","item":{"id":"item_4","type":"agent_message","text":"Steeping is complete. I’m finishing the final serving step and then I’ll close this out."}}
+{"type":"item.updated","item":{"id":"item_1","type":"todo_list","items":[{"text":"Boil water","completed":true},{"text":"Steep the tea","completed":true},{"text":"Pour and serve","completed":true}]}}
+{"type":"item.completed","item":{"id":"item_5","type":"agent_message","text":"DONE"}}
+{"type":"item.completed","item":{"id":"item_1","type":"todo_list","items":[{"text":"Boil water","completed":true},{"text":"Steep the tea","completed":true},{"text":"Pour and serve","completed":true}]}}
+{"type":"turn.completed","usage":{"input_tokens":54165,"cached_input_tokens":51584,"output_tokens":378,"reasoning_output_tokens":19}}
