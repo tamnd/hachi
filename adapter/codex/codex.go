@@ -11,6 +11,7 @@ import (
 	"errors"
 	"io"
 	"os/exec"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -65,7 +66,11 @@ func (d *Driver) Run(ctx context.Context, sess adapter.Session, msg string) (ada
 		return nil, err
 	}
 
-	s := &stream{ch: make(chan waggle.Event, 64), cancel: func() { _ = cmd.Process.Signal(syscall.SIGTERM) }}
+	s := &stream{ch: make(chan waggle.Event, 64)}
+	s.cancel = func() {
+		s.stopped.Store(true)
+		_ = cmd.Process.Signal(syscall.SIGTERM)
+	}
 	go func() {
 		defer close(s.ch)
 		p := parser{sess: sess.ID, bee: name}
@@ -96,7 +101,8 @@ func (d *Driver) Run(ctx context.Context, sess adapter.Session, msg string) (ada
 			return
 		}
 		err := cmd.Wait()
-		if err != nil && ctx.Err() == nil {
+		// A user-initiated stop is a clean end of the turn, not a death.
+		if err != nil && ctx.Err() == nil && !s.stopped.Load() {
 			var xe *exec.ExitError
 			code := -1
 			if errors.As(err, &xe) {
@@ -109,8 +115,9 @@ func (d *Driver) Run(ctx context.Context, sess adapter.Session, msg string) (ada
 }
 
 type stream struct {
-	ch     chan waggle.Event
-	cancel func()
+	ch      chan waggle.Event
+	cancel  func()
+	stopped atomic.Bool
 }
 
 func (s *stream) Events() <-chan waggle.Event { return s.ch }
@@ -216,20 +223,20 @@ func (p *parser) item(l codexLine) []waggle.Event {
 		}
 		return []waggle.Event{p.event(waggle.KindFinding, waggle.Enc(waggle.Message{Text: it.Text}))}
 	case "command_execution":
-		t := waggle.Tool{Command: it.Command, Status: it.Status}
+		t := waggle.Tool{Ref: it.ID, Command: it.Command, Status: it.Status}
 		if done {
 			t.Output = it.Output
 			t.ExitCode = it.Exit
 		}
 		return []waggle.Event{p.event(waggle.KindTool, waggle.Enc(t))}
 	case "file_change":
-		e := waggle.Edit{Status: it.Status}
+		e := waggle.Edit{Ref: it.ID, Status: it.Status}
 		for _, c := range it.Changes {
 			e.Changes = append(e.Changes, waggle.FileChange{Path: c.Path, Op: c.Kind})
 		}
 		return []waggle.Event{p.event(waggle.KindEdit, waggle.Enc(e))}
 	case "mcp_tool_call", "web_search":
-		t := waggle.Tool{Command: it.Type, Status: it.Status}
+		t := waggle.Tool{Ref: it.ID, Command: it.Type, Status: it.Status}
 		return []waggle.Event{p.event(waggle.KindTool, waggle.Enc(t))}
 	case "todo_list":
 		return nil // plan chatter; deliberately not rendered at S0

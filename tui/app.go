@@ -9,11 +9,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/spinner"
-	"github.com/charmbracelet/bubbles/textarea"
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/spinner"
+	"charm.land/bubbles/v2/textarea"
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/tamnd/hachi/hive"
 	"github.com/tamnd/hachi/waggle"
@@ -28,8 +28,7 @@ type Options struct {
 
 // Run starts the TUI and blocks until the user quits.
 func Run(svc hive.Service, opts Options) error {
-	m := newModel(svc, opts)
-	p := tea.NewProgram(m, tea.WithAltScreen())
+	p := tea.NewProgram(newModel(svc, opts))
 	_, err := p.Run()
 	return err
 }
@@ -51,19 +50,22 @@ type model struct {
 	screen screen
 
 	// chat
-	sess    hive.SessionInfo
-	draft   bool // no session created yet; first send creates one
-	items   []*item
-	lastSeq uint64
-	vp      viewport.Model
-	ta      textarea.Model
-	spin    spinner.Model
-	working bool
-	started time.Time
-	tokens  waggle.Cost
-	errText string
-	watch   <-chan waggle.Event
-	cancel  context.CancelFunc
+	sess     hive.SessionInfo
+	draft    bool // no session created yet; first send creates one
+	items    []*item
+	byRef    map[string]int // bee/ref -> items index, for in-place card updates
+	lastSeq  uint64
+	vp       viewport.Model
+	ta       textarea.Model
+	spin     spinner.Model
+	working  bool
+	steering bool // turn stopped by esc, next send resumes
+	started  time.Time
+	tokens   waggle.Cost
+	expanded bool // tool output expanded
+	errText  string
+	watch    <-chan waggle.Event
+	cancel   context.CancelFunc
 
 	// list
 	sessions []hive.SessionInfo
@@ -71,25 +73,32 @@ type model struct {
 }
 
 func newModel(svc hive.Service, opts Options) *model {
-	th := newTheme()
-
 	ta := textarea.New()
-	ta.Placeholder = "what should we build? (enter sends, ctrl+j newline)"
-	ta.Prompt = "┃ "
+	ta.Placeholder = "what should we build?"
+	ta.Prompt = ""
 	ta.CharLimit = 0
 	ta.ShowLineNumbers = false
-	ta.SetHeight(1)
+	ta.DynamicHeight = true
+	ta.MinHeight = 1
+	ta.MaxHeight = 6
+	ta.SetVirtualCursor(true)
 	ta.KeyMap.InsertNewline.SetEnabled(false)
-	ta.Focus()
 
 	sp := spinner.New(spinner.WithSpinner(spinner.MiniDot))
-	sp.Style = th.Brain
 
-	return &model{
-		svc: svc, opts: opts, th: th, md: newMDCache(),
+	m := &model{
+		svc: svc, opts: opts,
+		th: newTheme(true), md: newMDCache(true),
 		screen: screenChat, draft: true,
-		ta: ta, spin: sp, vp: viewport.New(0, 0),
+		byRef: map[string]int{},
+		ta:    ta, spin: sp, vp: viewport.New(),
 	}
+	m.applyTheme()
+	return m
+}
+
+func (m *model) applyTheme() {
+	m.spin.Style = m.th.Brain
 }
 
 // --- messages ---
@@ -102,12 +111,14 @@ type openedMsg struct {
 	info  hive.SessionInfo
 	watch <-chan waggle.Event
 	stop  context.CancelFunc
+	send  string // message to send once the session is applied (draft flow)
 }
 type sentMsg struct{}
+type stoppedMsg struct{}
 type tickMsg time.Time
 
 func (m *model) Init() tea.Cmd {
-	return tea.Batch(m.spin.Tick, textarea.Blink)
+	return tea.Batch(m.spin.Tick, m.ta.Focus(), tea.RequestBackgroundColor)
 }
 
 func waitEvent(ch <-chan waggle.Event) tea.Cmd {
@@ -134,8 +145,10 @@ func (m *model) loadSessions() tea.Cmd {
 	}
 }
 
-// openSession creates or resumes a session and starts watching it.
-func (m *model) openSession(id waggle.SessionID) tea.Cmd {
+// openSession creates or resumes a session and starts watching it. A
+// non-empty send is delivered after the open lands in Update, never
+// before, so a draft's first message cannot race the session id.
+func (m *model) openSession(id waggle.SessionID, send string) tea.Cmd {
 	dir, brain := m.opts.Dir, m.opts.Brain
 	return func() tea.Msg {
 		info, err := m.svc.Open(context.Background(), id, dir, brain)
@@ -148,7 +161,7 @@ func (m *model) openSession(id waggle.SessionID) tea.Cmd {
 			stop()
 			return errMsg{err}
 		}
-		return openedMsg{info: info, watch: ch, stop: stop}
+		return openedMsg{info: info, watch: ch, stop: stop, send: send}
 	}
 }
 
@@ -162,6 +175,18 @@ func (m *model) send(text string) tea.Cmd {
 	}
 }
 
+func (m *model) stopTurn() tea.Cmd {
+	id := m.sess.ID
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if err := m.svc.Stop(ctx, id); err != nil {
+			return errMsg{err}
+		}
+		return stoppedMsg{}
+	}
+}
+
 // --- update ---
 
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -172,7 +197,17 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refresh(true)
 		return m, nil
 
-	case tea.KeyMsg:
+	case tea.BackgroundColorMsg:
+		dark := msg.IsDark()
+		if dark != m.th.dark {
+			m.th = newTheme(dark)
+			m.md = newMDCache(dark)
+			m.applyTheme()
+			m.redrawAll()
+		}
+		return m, nil
+
+	case tea.KeyPressMsg:
 		return m.key(msg)
 
 	case openedMsg:
@@ -181,12 +216,12 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.sess, m.watch, m.cancel = msg.info, msg.watch, msg.stop
 		m.draft = false
-		m.items = nil
-		m.lastSeq = 0
-		m.tokens = waggle.Cost{}
-		m.errText = ""
+		m.resetTranscript()
 		m.screen = screenChat
 		m.refresh(true)
+		if msg.send != "" {
+			return m, tea.Batch(waitEvent(m.watch), m.send(msg.send))
+		}
 		return m, waitEvent(m.watch)
 
 	case eventMsg:
@@ -198,9 +233,16 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case sentMsg:
 		m.working = true
+		m.steering = false
 		m.started = time.Now()
 		m.errText = ""
 		return m, tick()
+
+	case stoppedMsg:
+		m.working = false
+		m.steering = true
+		m.finishRunningCards()
+		return m, nil
 
 	case sessionsMsg:
 		m.sessions = msg.list
@@ -223,6 +265,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spin, cmd = m.spin.Update(msg)
+		if m.hasLiveCards() {
+			m.refresh(m.vp.AtBottom())
+		}
 		return m, cmd
 	}
 
@@ -231,32 +276,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-func (m *model) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m *model) key(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.screen == screenList {
-		switch msg.String() {
-		case "ctrl+c", "q", "esc", "ctrl+l":
-			m.screen = screenChat
-			return m, nil
-		case "up", "k":
-			if m.cursor > 0 {
-				m.cursor--
-			}
-			return m, nil
-		case "down", "j":
-			if m.cursor < len(m.sessions)-1 {
-				m.cursor++
-			}
-			return m, nil
-		case "n":
-			m.startDraft()
-			return m, nil
-		case "enter":
-			if len(m.sessions) > 0 {
-				return m, m.openSession(m.sessions[m.cursor].ID)
-			}
-			return m, nil
-		}
-		return m, nil
+		return m.keyList(msg)
 	}
 
 	switch msg.String() {
@@ -271,15 +293,20 @@ func (m *model) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+n":
 		m.startDraft()
 		return m, nil
+	case "ctrl+o":
+		m.expanded = !m.expanded
+		m.unfreezeTools()
+		m.refresh(m.vp.AtBottom())
+		return m, nil
+	case "pgup":
+		m.vp.PageUp()
+		return m, nil
+	case "pgdown":
+		m.vp.PageDown()
+		return m, nil
 	case "esc":
 		if m.working {
-			id := m.sess.ID
-			return m, func() tea.Msg {
-				if err := m.svc.Stop(context.Background(), id); err != nil {
-					return errMsg{err}
-				}
-				return nil
-			}
+			return m, m.stopTurn()
 		}
 		return m, nil
 	case "ctrl+j":
@@ -296,10 +323,9 @@ func (m *model) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.ta.Reset()
-		m.ta.SetHeight(1)
 		m.layout()
 		if m.draft {
-			return m, tea.Sequence(m.openSession(""), m.sendAfterOpen(text))
+			return m, m.openSession("", text)
 		}
 		return m, m.send(text)
 	}
@@ -310,18 +336,31 @@ func (m *model) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-// sendAfterOpen fires after openSession has set m.sess; tea.Sequence
-// guarantees the ordering.
-func (m *model) sendAfterOpen(text string) tea.Cmd {
-	return func() tea.Msg {
-		if m.sess.ID == "" {
-			return errMsg{fmt.Errorf("session not ready")}
+func (m *model) keyList(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c", "q", "esc", "ctrl+l":
+		m.screen = screenChat
+		return m, nil
+	case "up", "k":
+		if m.cursor > 0 {
+			m.cursor--
 		}
-		if err := m.svc.Send(context.Background(), m.sess.ID, text); err != nil {
-			return errMsg{err}
+		return m, nil
+	case "down", "j":
+		if m.cursor < len(m.sessions)-1 {
+			m.cursor++
 		}
-		return sentMsg{}
+		return m, nil
+	case "n":
+		m.startDraft()
+		return m, nil
+	case "enter":
+		if len(m.sessions) > 0 {
+			return m, m.openSession(m.sessions[m.cursor].ID, "")
+		}
+		return m, nil
 	}
+	return m, nil
 }
 
 func (m *model) startDraft() {
@@ -331,13 +370,19 @@ func (m *model) startDraft() {
 	}
 	m.sess = hive.SessionInfo{}
 	m.draft = true
+	m.resetTranscript()
+	m.screen = screenChat
+	m.refresh(true)
+}
+
+func (m *model) resetTranscript() {
 	m.items = nil
+	m.byRef = map[string]int{}
 	m.lastSeq = 0
 	m.tokens = waggle.Cost{}
 	m.errText = ""
 	m.working = false
-	m.screen = screenChat
-	m.refresh(true)
+	m.steering = false
 }
 
 // apply folds one event into the transcript and status.
@@ -357,19 +402,80 @@ func (m *model) apply(ev waggle.Event) {
 		return
 	case waggle.KindResult:
 		m.working = false
+		m.finishRunningCards()
+		m.refresh(m.vp.AtBottom())
 		return
 	case waggle.KindDied:
 		m.working = false
 	case waggle.KindMessage:
 		if ev.Bee == "human" {
 			m.working = true
+			m.steering = false
 			if m.started.IsZero() {
 				m.started = time.Now()
 			}
 		}
+	case waggle.KindTool, waggle.KindEdit:
+		if idx, ok := m.byRef[refKey(ev)]; ok {
+			prev := m.items[idx]
+			prev.ev = ev
+			prev.frozen = false
+			m.refresh(m.vp.AtBottom())
+			return
+		}
 	}
-	m.items = append(m.items, &item{ev: ev})
+	it := &item{ev: ev, start: ev.At}
+	m.items = append(m.items, it)
+	if k := refKey(ev); k != "" {
+		m.byRef[k] = len(m.items) - 1
+	}
 	m.refresh(m.vp.AtBottom() || m.vp.PastBottom())
+}
+
+func refKey(ev waggle.Event) string {
+	switch ev.Kind {
+	case waggle.KindTool:
+		if t, ok := decode[waggle.Tool](ev.Data); ok && t.Ref != "" {
+			return ev.Bee + "/" + t.Ref
+		}
+	case waggle.KindEdit:
+		if e, ok := decode[waggle.Edit](ev.Data); ok && e.Ref != "" {
+			return ev.Bee + "/" + e.Ref
+		}
+	}
+	return ""
+}
+
+// finishRunningCards marks any still-running card final so it stops
+// animating after the turn ends (stop, result, or death).
+func (m *model) finishRunningCards() {
+	for _, it := range m.items {
+		it.frozen = true
+	}
+}
+
+func (m *model) unfreezeTools() {
+	for _, it := range m.items {
+		if it.ev.Kind == waggle.KindTool {
+			it.frozen = false
+		}
+	}
+}
+
+func (m *model) redrawAll() {
+	for _, it := range m.items {
+		it.frozen = false
+	}
+	m.refresh(m.vp.AtBottom())
+}
+
+func (m *model) hasLiveCards() bool {
+	for _, it := range m.items {
+		if !it.frozen {
+			return true
+		}
+	}
+	return false
 }
 
 // --- view ---
@@ -378,27 +484,27 @@ func (m *model) layout() {
 	if m.w == 0 {
 		return
 	}
-	lines := strings.Count(m.ta.Value(), "\n") + 1
-	if lines > 6 {
-		lines = 6
+	m.ta.SetWidth(m.w - 4) // composer border + padding
+	m.vp.SetWidth(m.w)
+	h := m.h - m.ta.Height() - 5 // header + composer box + status
+	if h < 1 {
+		h = 1
 	}
-	m.ta.SetHeight(lines)
-	m.ta.SetWidth(m.w - 2)
-	m.vp.Width = m.w
-	m.vp.Height = m.h - m.ta.Height() - 3 // composer + status + gap
-	if m.vp.Height < 1 {
-		m.vp.Height = 1
-	}
+	m.vp.SetHeight(h)
 }
 
 func (m *model) refresh(follow bool) {
 	if m.w == 0 {
 		return
 	}
+	rc := renderCtx{
+		th: m.th, md: m.md, width: m.vp.Width(),
+		frame: m.spin.View(), expanded: m.expanded, now: time.Now(),
+	}
 	var b strings.Builder
 	first := true
 	for _, it := range m.items {
-		s := it.render(m.th, m.md, m.vp.Width)
+		s := it.render(rc)
 		if s == "" {
 			continue
 		}
@@ -414,46 +520,80 @@ func (m *model) refresh(follow bool) {
 	}
 }
 
-func (m *model) View() string {
-	if m.w == 0 {
-		return "loading…"
+func (m *model) View() tea.View {
+	var content string
+	switch {
+	case m.w == 0:
+		content = "loading…"
+	case m.screen == screenList:
+		content = m.viewList()
+	default:
+		content = m.viewChat()
 	}
-	if m.screen == screenList {
-		return m.viewList()
-	}
+	v := tea.NewView(content)
+	v.AltScreen = true
+	v.WindowTitle = "hachi"
+	return v
+}
+
+func (m *model) viewChat() string {
 	body := m.vp.View()
 	if len(m.items) == 0 {
 		body = m.viewWelcome()
 	}
-	return body + "\n" + m.ta.View() + "\n" + m.viewStatus()
+	composer := m.th.Composer.Width(m.w - 2).Render(m.ta.View())
+	return m.viewHeader() + "\n" + body + "\n" + composer + "\n" + m.viewStatus()
+}
+
+func (m *model) viewHeader() string {
+	left := " " + m.th.Header.Render("hachi") + " " + m.th.HeaderSub.Render("蜂")
+	if t := m.sess.Title; t != "" {
+		left += m.th.HeaderSub.Render("  ·  ") + m.th.HeaderSub.Render(truncate(t, m.w/2))
+	}
+	right := m.th.BrainChip.Render(m.brainName()) + " "
+	gap := m.w - lipgloss.Width(left) - lipgloss.Width(right)
+	if gap < 1 {
+		return left
+	}
+	return left + strings.Repeat(" ", gap) + right
 }
 
 func (m *model) viewWelcome() string {
 	logo := m.th.Logo.Render("hachi 蜂")
-	sub := m.th.Faint.Render("the glass hive · brain: " + m.brainName() + " · dir: " + m.opts.Dir)
-	block := lipgloss.JoinVertical(lipgloss.Center, logo, "", sub)
-	return lipgloss.Place(m.w, m.vp.Height, lipgloss.Center, lipgloss.Center, block)
+	sub := m.th.Faint.Render("the glass hive")
+	where := m.th.Faint.Render(m.opts.Dir)
+	hints := m.th.StatusKey.Render("enter") + m.th.Faint.Render(" send · ") +
+		m.th.StatusKey.Render("esc") + m.th.Faint.Render(" stop · ") +
+		m.th.StatusKey.Render("ctrl+l") + m.th.Faint.Render(" sessions")
+	block := lipgloss.JoinVertical(lipgloss.Center, logo, "", sub, where, "", hints)
+	return lipgloss.Place(m.w, m.vp.Height(), lipgloss.Center, lipgloss.Center, block)
 }
 
 func (m *model) viewStatus() string {
-	left := m.th.Brain.Render(m.brainName())
+	var left string
 	switch {
 	case m.errText != "":
-		left += "  " + m.th.ToolBad.Render(truncate(m.errText, m.w/2))
+		left = " " + m.th.ToolBad.Render(truncate(m.errText, m.w/2))
 	case m.working:
-		left += "  " + m.spin.View() + m.th.StatusBar.Render(
+		left = " " + m.spin.View() + m.th.StatusBar.Render(
 			fmt.Sprintf(" working %s", time.Since(m.started).Round(time.Second)))
+	case m.steering:
+		left = " " + m.th.StatusKey.Render("stopped") + m.th.StatusBar.Render(" · say where to go next")
 	default:
-		left += "  " + m.th.StatusBar.Render("idle")
+		left = " " + m.th.StatusBar.Render("idle")
 	}
-	if n := m.tokens.InputTokens + m.tokens.OutputTokens; n > 0 {
-		left += m.th.StatusBar.Render(fmt.Sprintf("  %s tok", compact(n)))
+	if m.tokens.InputTokens+m.tokens.OutputTokens > 0 {
+		left += m.th.StatusBar.Render(fmt.Sprintf("  %s in · %s out",
+			compact(m.tokens.InputTokens), compact(m.tokens.OutputTokens)))
+		if m.tokens.CachedInputTokens > 0 {
+			left += m.th.StatusBar.Render(fmt.Sprintf(" · %s cached", compact(m.tokens.CachedInputTokens)))
+		}
 	}
-	help := m.th.StatusBar.Render("enter") + m.th.Faint.Render(" send  ") +
-		m.th.StatusBar.Render("esc") + m.th.Faint.Render(" stop  ") +
-		m.th.StatusBar.Render("^l") + m.th.Faint.Render(" sessions  ") +
-		m.th.StatusBar.Render("^n") + m.th.Faint.Render(" new  ") +
-		m.th.StatusBar.Render("^c") + m.th.Faint.Render(" quit")
+	help := m.th.StatusKey.Render("enter") + m.th.Faint.Render(" send  ") +
+		m.th.StatusKey.Render("esc") + m.th.Faint.Render(" stop  ") +
+		m.th.StatusKey.Render("^o") + m.th.Faint.Render(" expand  ") +
+		m.th.StatusKey.Render("^l") + m.th.Faint.Render(" sessions  ") +
+		m.th.StatusKey.Render("^c") + m.th.Faint.Render(" quit ")
 	gap := m.w - lipgloss.Width(left) - lipgloss.Width(help)
 	if gap < 1 {
 		return left
@@ -472,7 +612,7 @@ func (m *model) viewList() string {
 		if title == "" {
 			title = "(untitled)"
 		}
-		row := fmt.Sprintf("%s  %s  %s", stateDot(m.th, s.State), title,
+		row := fmt.Sprintf("%s  %s  %s", stateDot(m.th, s.State), truncate(title, m.w-30),
 			m.th.Faint.Render(s.Updated.Format("Jan 2 15:04")))
 		if i == m.cursor {
 			row = m.th.ListSel.Render("→ ") + row
@@ -482,7 +622,8 @@ func (m *model) viewList() string {
 		b.WriteString(row + "\n")
 	}
 	b.WriteString("\n" + m.th.Faint.Render("enter open · n new · esc back"))
-	return lipgloss.NewStyle().Padding(1, 2).Render(b.String())
+	panel := m.th.ListBox.Render(b.String())
+	return lipgloss.Place(m.w, m.h, lipgloss.Center, lipgloss.Center, panel)
 }
 
 func stateDot(t theme, s hive.State) string {

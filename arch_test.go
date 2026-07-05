@@ -31,7 +31,7 @@ var allowedInternal = map[string][]string{
 // allowedExternal is the dependency budget: the charm stack, cobra, and
 // nothing else. Growing this list is a design decision, not a convenience.
 var allowedExternal = []string{
-	"github.com/charmbracelet/",
+	"charm.land/", // bubbletea v2 and friends
 	"github.com/spf13/cobra",
 	"golang.org/x/mod", // this test file only
 }

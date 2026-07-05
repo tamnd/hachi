@@ -114,6 +114,11 @@ func TestToolUseTranscript(t *testing.T) {
 		if tool.ExitCode == nil {
 			t.Errorf("completed tool without exit code: %+v", tool)
 		}
+		// Ref carries the codex item id so the client can update the
+		// in_progress card in place when the completion arrives.
+		if tool.Ref == "" {
+			t.Errorf("completed tool without a ref: %+v", tool)
+		}
 	}
 }
 

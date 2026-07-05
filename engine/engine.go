@@ -24,9 +24,16 @@ type Engine struct {
 	mu       sync.Mutex
 	seq      map[waggle.SessionID]uint64
 	state    map[waggle.SessionID]hive.State
-	running  map[waggle.SessionID]adapter.Stream
+	running  map[waggle.SessionID]*turn
 	watchers map[waggle.SessionID]map[chan waggle.Event]struct{}
 	nonce    uint64
+}
+
+// turn is one in-flight run: its stream plus a channel that closes when
+// the pump has fully drained it.
+type turn struct {
+	stream adapter.Stream
+	done   chan struct{}
 }
 
 var _ hive.Service = (*Engine)(nil)
@@ -37,7 +44,7 @@ func New(j *journal.Files) *Engine {
 		Journal:  j,
 		seq:      map[waggle.SessionID]uint64{},
 		state:    map[waggle.SessionID]hive.State{},
-		running:  map[waggle.SessionID]adapter.Stream{},
+		running:  map[waggle.SessionID]*turn{},
 		watchers: map[waggle.SessionID]map[chan waggle.Event]struct{}{},
 	}
 }
@@ -127,16 +134,18 @@ func (e *Engine) Send(ctx context.Context, id waggle.SessionID, msg string) erro
 		e.setState(id, hive.StateDied)
 		return err
 	}
+	t := &turn{stream: stream, done: make(chan struct{})}
 	e.mu.Lock()
-	e.running[id] = stream
+	e.running[id] = t
 	e.mu.Unlock()
 
-	go e.pump(id, m, stream)
+	go e.pump(id, m, t)
 	return nil
 }
 
 // pump drains one turn's stream into the journal and watchers.
-func (e *Engine) pump(id waggle.SessionID, m journal.Meta, stream adapter.Stream) {
+func (e *Engine) pump(id waggle.SessionID, m journal.Meta, t *turn) {
+	stream := t.stream
 	final := hive.StateIdle
 	for ev := range stream.Events() {
 		ev.Sess = id
@@ -159,6 +168,7 @@ func (e *Engine) pump(id waggle.SessionID, m journal.Meta, stream adapter.Stream
 	delete(e.running, id)
 	e.state[id] = final
 	e.mu.Unlock()
+	close(t.done)
 }
 
 // Watch replays the session and then follows it live. The returned
@@ -209,15 +219,24 @@ func (e *Engine) Watch(ctx context.Context, id waggle.SessionID) (<-chan waggle.
 	return out, nil
 }
 
-// Stop interrupts the running turn, if any.
+// Stop interrupts the running turn, if any, and waits until the turn has
+// fully wound down so a Send right after Stop is never rejected as busy.
 func (e *Engine) Stop(ctx context.Context, id waggle.SessionID) error {
 	e.mu.Lock()
-	stream, ok := e.running[id]
+	t, ok := e.running[id]
 	e.mu.Unlock()
 	if !ok {
 		return nil
 	}
-	return stream.Stop(ctx)
+	if err := t.stream.Stop(ctx); err != nil {
+		return err
+	}
+	select {
+	case <-t.done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // append assigns the session sequence number, persists, and fans out.

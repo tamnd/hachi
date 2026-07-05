@@ -64,8 +64,11 @@ type Message struct {
 	Text string `json:"text"`
 }
 
-// Tool is the payload for KindTool.
+// Tool is the payload for KindTool. Ref correlates the lifecycle of one
+// tool call: a client that sees two Tool events with the same Ref updates
+// the earlier card in place instead of appending a new one.
 type Tool struct {
+	Ref      string `json:"ref,omitempty"`
 	Command  string `json:"command"`
 	Output   string `json:"output,omitempty"`
 	ExitCode *int   `json:"exit_code,omitempty"`
@@ -78,8 +81,9 @@ type FileChange struct {
 	Op   string `json:"op"` // add | update | delete
 }
 
-// Edit is the payload for KindEdit.
+// Edit is the payload for KindEdit. Ref works as in Tool.
 type Edit struct {
+	Ref     string       `json:"ref,omitempty"`
 	Changes []FileChange `json:"changes"`
 	Status  string       `json:"status"`
 }
