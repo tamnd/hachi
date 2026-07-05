@@ -24,6 +24,11 @@ var gallery = []waggle.Event{
 	{Kind: waggle.KindTool, Bee: "codex", Data: waggle.Enc(waggle.Tool{Command: strings.Repeat("very-long-command ", 40), Status: "completed"})},
 	{Kind: waggle.KindEdit, Bee: "codex", Data: waggle.Enc(waggle.Edit{Ref: "item_3", Status: "in_progress"})},
 	{Kind: waggle.KindEdit, Bee: "codex", Data: waggle.Enc(waggle.Edit{Ref: "item_3", Status: "completed", Changes: []waggle.FileChange{{Path: "tui/app.go", Op: "update"}, {Path: "tui/new.go", Op: "add"}, {Path: "tui/old.go", Op: "delete"}}})},
+	{Kind: waggle.KindPlan, Bee: "codex", Data: waggle.Enc(waggle.Plan{Ref: "item_4", Items: []waggle.PlanItem{
+		{Text: "Scaffold the repo and CI", Done: true},
+		{Text: "Implement the game loop with a deliberately overlong step description that has to be truncated somewhere sensible before it wrecks the layout of the card", Done: false},
+		{Text: "写测试并修复所有问题", Done: false},
+	}})},
 	{Kind: waggle.KindDied, Bee: "codex", Data: waggle.Enc(waggle.Died{Error: "stream error: exceeded retry limit"})},
 	{Kind: waggle.KindRaw, Bee: "codex", Data: waggle.Enc(waggle.Raw{Line: `{"type":"mystery"}`})},
 }
@@ -71,8 +76,8 @@ func TestRenderExpandedShowsMore(t *testing.T) {
 func TestRunningCardsNeverFreeze(t *testing.T) {
 	rc := renderCtx{th: newTheme(true), md: newMDCache(true), width: 80, frame: "⠋", now: time.Now()}
 	it := &item{ev: gallery[5], start: time.Now().Add(-2 * time.Second)} // in_progress tool
-	if out := it.render(rc); !strings.Contains(out, "running") {
-		t.Fatalf("running tool card missing live status: %q", out)
+	if out := it.render(rc); !strings.Contains(out, "⠋") || !strings.Contains(out, "2s") {
+		t.Fatalf("running tool card must show the spinner and elapsed time: %q", out)
 	}
 	if it.frozen {
 		t.Fatal("in_progress tool card must not freeze; it has to keep animating")
@@ -140,5 +145,29 @@ func TestApplyCostAccumulates(t *testing.T) {
 	}
 	if m.tokens.InputTokens != 200 || m.tokens.CachedInputTokens != 80 || m.tokens.OutputTokens != 14 {
 		t.Fatalf("cost accumulation wrong: %+v", m.tokens)
+	}
+}
+
+// TestApplyLivePulse checks that live snapshots replace each other and the
+// settled cost at turn end never double counts what pulses already showed.
+func TestApplyLivePulse(t *testing.T) {
+	m := newModel(nil, Options{})
+	m.apply(waggle.Event{Seq: 1, Kind: waggle.KindCost, At: time.Now(),
+		Data: waggle.Enc(waggle.Cost{InputTokens: 100, OutputTokens: 10, Live: true})})
+	m.apply(waggle.Event{Seq: 2, Kind: waggle.KindCost, At: time.Now(),
+		Data: waggle.Enc(waggle.Cost{InputTokens: 250, OutputTokens: 30, Live: true})})
+	if m.live.InputTokens != 250 || m.live.OutputTokens != 30 {
+		t.Fatalf("live pulse must replace, not add: %+v", m.live)
+	}
+	if m.tokens.InputTokens != 0 {
+		t.Fatalf("pulses must not touch settled tokens: %+v", m.tokens)
+	}
+	m.apply(waggle.Event{Seq: 3, Kind: waggle.KindCost, At: time.Now(),
+		Data: waggle.Enc(waggle.Cost{InputTokens: 260, OutputTokens: 32})})
+	if m.tokens.InputTokens != 260 || m.tokens.OutputTokens != 32 {
+		t.Fatalf("settled cost wrong: %+v", m.tokens)
+	}
+	if m.live.InputTokens != 0 || m.live.OutputTokens != 0 {
+		t.Fatalf("settle must clear the live snapshot: %+v", m.live)
 	}
 }

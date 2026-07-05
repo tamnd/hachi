@@ -11,6 +11,8 @@ import (
 	"errors"
 	"io"
 	"os/exec"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -34,6 +36,9 @@ type Driver struct {
 	// Args are extra arguments appended before the prompt, letting eval
 	// rigs point at a local model profile without the driver knowing.
 	Args []string
+	// Sessions overrides the rollout log directory scanned for live token
+	// counts; empty means $CODEX_HOME (or ~/.codex) plus /sessions.
+	Sessions string
 }
 
 // Detect reports whether the codex binary is on PATH.
@@ -43,12 +48,20 @@ func (d *Driver) Detect() error {
 }
 
 // Run starts one turn: a fresh thread when sess.Resume is empty, otherwise
-// codex exec resume with the stored thread id.
+// codex exec resume with the stored thread id. The sandbox is
+// workspace-write with network on: exec mode cannot ask for approval, and
+// a brain that cannot fetch a dependency or push a branch is not doing
+// real work. Anything outside the workspace stays off limits.
 func (d *Driver) Run(ctx context.Context, sess adapter.Session, msg string) (adapter.Stream, error) {
-	args := []string{"exec", "--json", "--skip-git-repo-check"}
+	// The resume subcommand only takes --json and --skip-git-repo-check;
+	// sandbox flags belong to exec and must come before it.
+	sandbox := []string{"--sandbox", "workspace-write", "-c", "sandbox_workspace_write.network_access=true"}
+	common := []string{"--json", "--skip-git-repo-check"}
+	args := append([]string{"exec"}, sandbox...)
 	if sess.Resume != "" {
-		args = []string{"exec", "resume", sess.Resume, "--json", "--skip-git-repo-check"}
+		args = append(args, "resume", sess.Resume)
 	}
+	args = append(args, common...)
 	args = append(args, d.Args...)
 	args = append(args, msg)
 
@@ -61,7 +74,10 @@ func (d *Driver) Run(ctx context.Context, sess adapter.Session, msg string) (ada
 	if err != nil {
 		return nil, err
 	}
-	cmd.Stderr = nil // progress noise; the JSONL on stdout is the record
+	// Keep the tail of stderr: on a nonzero exit it is the only clue
+	// (bad flag, auth failure), and "exit status 2" alone helps nobody.
+	errTail := &tailBuffer{max: 4096}
+	cmd.Stderr = errTail
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
@@ -73,12 +89,38 @@ func (d *Driver) Run(ctx context.Context, sess adapter.Session, msg string) (ada
 	}
 	go func() {
 		defer close(s.ch)
+		// Pulses run on their own goroutine, so wind them down before the
+		// channel closes: cancel, then wait.
+		pctx, pcancel := context.WithCancel(ctx)
+		var pulses sync.WaitGroup
+		defer func() {
+			pcancel()
+			pulses.Wait()
+		}()
 		p := parser{sess: sess.ID, bee: name}
+		pulsing := false
 		sc := bufio.NewScanner(stdout)
 		sc.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
 		done := false
 		for !done && sc.Scan() {
 			for _, ev := range p.line(sc.Bytes()) {
+				if ev.Kind == waggle.KindSpawned && !pulsing {
+					pulsing = true
+					var sp waggle.Spawned
+					if json.Unmarshal(ev.Data, &sp) == nil && sp.Resume != "" {
+						fromStart := sess.Resume == ""
+						pulses.Add(1)
+						go func() {
+							defer pulses.Done()
+							tailTokens(pctx, d.sessionsRoot(), sp.Resume, fromStart, func(c waggle.Cost) {
+								select {
+								case s.ch <- p.event(waggle.KindCost, waggle.Enc(c)):
+								case <-pctx.Done():
+								}
+							})
+						}()
+					}
+				}
 				s.ch <- ev
 				// The turn is over at its terminal event. The process can
 				// linger after turn.completed (telemetry flush, child pipes),
@@ -108,7 +150,11 @@ func (d *Driver) Run(ctx context.Context, sess adapter.Session, msg string) (ada
 			if errors.As(err, &xe) {
 				code = xe.ExitCode()
 			}
-			s.ch <- p.event(waggle.KindDied, waggle.Enc(waggle.Died{Error: err.Error(), Code: code}))
+			msg := err.Error()
+			if tail := strings.TrimSpace(errTail.String()); tail != "" {
+				msg += ": " + tail
+			}
+			s.ch <- p.event(waggle.KindDied, waggle.Enc(waggle.Died{Error: msg, Code: code}))
 		}
 	}()
 	return s, nil
@@ -118,6 +164,29 @@ type stream struct {
 	ch      chan waggle.Event
 	cancel  func()
 	stopped atomic.Bool
+}
+
+// tailBuffer keeps the last max bytes written to it.
+type tailBuffer struct {
+	mu  sync.Mutex
+	buf []byte
+	max int
+}
+
+func (t *tailBuffer) Write(p []byte) (int, error) {
+	t.mu.Lock()
+	t.buf = append(t.buf, p...)
+	if len(t.buf) > t.max {
+		t.buf = t.buf[len(t.buf)-t.max:]
+	}
+	t.mu.Unlock()
+	return len(p), nil
+}
+
+func (t *tailBuffer) String() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return string(t.buf)
 }
 
 func (s *stream) Events() <-chan waggle.Event { return s.ch }
@@ -135,10 +204,12 @@ func (s *stream) Stop(ctx context.Context) error {
 // parser turns codex exec --json lines into waggle events. Shapes come
 // from real transcripts in testdata; anything unrecognized becomes
 // KindRaw so the drift gate can catch upstream changes.
+// seq is atomic because the pulse goroutine stamps events concurrently
+// with the stdout parse loop.
 type parser struct {
 	sess waggle.SessionID
 	bee  string
-	seq  uint64
+	seq  atomic.Uint64
 }
 
 type codexLine struct {
@@ -166,11 +237,14 @@ type codexItem struct {
 		Path string `json:"path"`
 		Kind string `json:"kind"`
 	} `json:"changes"`
+	Items []struct {
+		Text      string `json:"text"`
+		Completed bool   `json:"completed"`
+	} `json:"items"`
 }
 
 func (p *parser) event(k waggle.Kind, data json.RawMessage) waggle.Event {
-	p.seq++
-	return waggle.Event{Seq: p.seq, Sess: p.sess, Bee: p.bee, Kind: k, At: time.Now(), Data: data}
+	return waggle.Event{Seq: p.seq.Add(1), Sess: p.sess, Bee: p.bee, Kind: k, At: time.Now(), Data: data}
 }
 
 func (p *parser) line(b []byte) []waggle.Event {
@@ -239,7 +313,11 @@ func (p *parser) item(l codexLine) []waggle.Event {
 		t := waggle.Tool{Ref: it.ID, Command: it.Type, Status: it.Status}
 		return []waggle.Event{p.event(waggle.KindTool, waggle.Enc(t))}
 	case "todo_list":
-		return nil // plan chatter; deliberately not rendered at S0
+		pl := waggle.Plan{Ref: it.ID}
+		for _, item := range it.Items {
+			pl.Items = append(pl.Items, waggle.PlanItem{Text: item.Text, Done: item.Completed})
+		}
+		return []waggle.Event{p.event(waggle.KindPlan, waggle.Enc(pl))}
 	}
 	raw, _ := json.Marshal(l)
 	return []waggle.Event{p.event(waggle.KindRaw, waggle.Enc(waggle.Raw{Line: string(raw)}))}

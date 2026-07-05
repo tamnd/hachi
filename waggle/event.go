@@ -25,6 +25,9 @@ const (
 	KindEdit Kind = "edit"
 	// KindFinding is intermediate reasoning or progress the brain surfaced.
 	KindFinding Kind = "finding"
+	// KindPlan is the brain's working checklist, replacing earlier
+	// versions of itself as steps complete.
+	KindPlan Kind = "plan"
 	// KindNeedInput means the run is blocked on the human.
 	KindNeedInput Kind = "need_input"
 	// KindCost carries token usage for a completed turn.
@@ -88,12 +91,29 @@ type Edit struct {
 	Status  string       `json:"status"`
 }
 
-// Cost is the payload for KindCost.
+// PlanItem is one step in a Plan.
+type PlanItem struct {
+	Text string `json:"text"`
+	Done bool   `json:"done"`
+}
+
+// Plan is the payload for KindPlan. Ref works as in Tool: each update
+// carries the full list and replaces the earlier card.
+type Plan struct {
+	Ref   string     `json:"ref,omitempty"`
+	Items []PlanItem `json:"items"`
+}
+
+// Cost is the payload for KindCost. A turn settles with one Cost at the
+// end; while it runs an adapter may also emit Live snapshots carrying the
+// usage so far. Live snapshots replace each other instead of accumulating,
+// so clients can show download progress without double counting.
 type Cost struct {
 	InputTokens       int64 `json:"input_tokens"`
 	CachedInputTokens int64 `json:"cached_input_tokens"`
 	OutputTokens      int64 `json:"output_tokens"`
 	ReasoningTokens   int64 `json:"reasoning_tokens"`
+	Live              bool  `json:"live,omitempty"`
 }
 
 // Died is the payload for KindDied.

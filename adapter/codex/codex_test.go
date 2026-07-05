@@ -43,7 +43,7 @@ func kinds(evs []waggle.Event) map[waggle.Kind]int {
 // TestNoDrift is the drift gate: every line of a real transcript must map
 // to a typed event. A KindRaw here means upstream changed shape.
 func TestNoDrift(t *testing.T) {
-	for _, name := range []string{"simple.jsonl", "tooluse.jsonl"} {
+	for _, name := range []string{"simple.jsonl", "tooluse.jsonl", "plan.jsonl"} {
 		t.Run(name, func(t *testing.T) {
 			for _, ev := range parseFixture(t, name) {
 				if ev.Kind == waggle.KindRaw {
@@ -119,6 +119,43 @@ func TestToolUseTranscript(t *testing.T) {
 		if tool.Ref == "" {
 			t.Errorf("completed tool without a ref: %+v", tool)
 		}
+	}
+}
+
+// TestPlanTranscript checks the todo_list mapping over a real captured
+// run: every plan event carries the ref and the full step list, and the
+// final one shows completed steps.
+func TestPlanTranscript(t *testing.T) {
+	evs := parseFixture(t, "plan.jsonl")
+	var plans []waggle.Plan
+	for _, ev := range evs {
+		if ev.Kind != waggle.KindPlan {
+			continue
+		}
+		var pl waggle.Plan
+		if err := json.Unmarshal(ev.Data, &pl); err != nil {
+			t.Fatal(err)
+		}
+		if pl.Ref == "" {
+			t.Errorf("plan event without ref: %+v", pl)
+		}
+		if len(pl.Items) == 0 {
+			t.Errorf("plan event without items: %+v", pl)
+		}
+		plans = append(plans, pl)
+	}
+	if len(plans) < 2 {
+		t.Fatalf("expected several plan updates, got %d", len(plans))
+	}
+	last := plans[len(plans)-1]
+	var done int
+	for _, item := range last.Items {
+		if item.Done {
+			done++
+		}
+	}
+	if done == 0 {
+		t.Fatalf("final plan shows no completed steps: %+v", last)
 	}
 }
 

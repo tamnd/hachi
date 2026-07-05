@@ -124,23 +124,13 @@ func renderEvent(rc renderCtx, it *item) (string, bool) {
 		if !ok {
 			return "", true
 		}
-		if edit.Status == "in_progress" && len(edit.Changes) == 0 {
-			return "", false
+		return renderEdit(rc, edit)
+	case waggle.KindPlan:
+		plan, ok := decode[waggle.Plan](ev.Data)
+		if !ok || len(plan.Items) == 0 {
+			return "", true
 		}
-		var b strings.Builder
-		for i, c := range edit.Changes {
-			if i > 0 {
-				b.WriteString("\n")
-			}
-			b.WriteString(opBadge(t, c.Op))
-			b.WriteString(" ")
-			b.WriteString(t.EditPath.Render(truncate(c.Path, inner-8)))
-		}
-		if edit.Status == "in_progress" {
-			b.WriteString("\n" + t.Faint.Render(rc.frame+" writing"))
-			return t.EditBox.Width(rc.width - 2).Render(b.String()), false
-		}
-		return t.EditBox.Width(rc.width - 2).Render(b.String()), true
+		return renderPlan(rc, plan), true
 	case waggle.KindDied:
 		died, _ := decode[waggle.Died](ev.Data)
 		msg := died.Error
@@ -155,39 +145,134 @@ func renderEvent(rc renderCtx, it *item) (string, bool) {
 	return "", true // spawned, cost, result, need_input live in the status bar
 }
 
+// outputClip is how many output lines a collapsed tool card shows.
+const outputClip = 6
+
+// renderTool draws a flat tool card: status glyph, the command, timing,
+// then clipped output hanging under it. No box; the transcript reads like
+// a log, and the hidden-lines line is the expand affordance.
 func renderTool(rc renderCtx, it *item, tool waggle.Tool) (string, bool) {
+	t := rc.th
+	inner := rc.width - 8
+	if inner < 20 {
+		inner = 20
+	}
+	cmd := t.ToolCmd.Render("$ " + truncate(sanitize(tool.Command), inner))
+
+	if tool.Status == "in_progress" {
+		dur := t.ToolDur.Render("  " + rc.now.Sub(it.start).Round(time.Second).String())
+		return t.Brain.Render(rc.frame) + " " + cmd + dur, false
+	}
+
+	icon := t.ToolOK.Render("✓")
+	tag := ""
+	if tool.ExitCode != nil && *tool.ExitCode != 0 {
+		icon = t.ToolBad.Render("×")
+		tag = t.ToolBad.Render(fmt.Sprintf("  exit %d", *tool.ExitCode))
+	}
+	dur := ""
+	if !it.start.IsZero() && it.ev.At.After(it.start) {
+		dur = t.ToolDur.Render("  " + it.ev.At.Sub(it.start).Round(10*time.Millisecond).String())
+	}
+	head := icon + " " + cmd + tag + dur
+	out := strings.TrimSpace(sanitize(tool.Output))
+	if out == "" {
+		return head, true
+	}
+	// Expanded state is part of the cache key via the frozen bit: the
+	// model unfreezes tool cards when the user toggles ctrl+o.
+	return head + "\n" + hangOutput(t, out, rc.expanded, inner), true
+}
+
+// hangOutput indents output under its card and clips it, ending with the
+// hidden-line count that doubles as the expand hint.
+func hangOutput(t theme, s string, expanded bool, width int) string {
+	lines := strings.Split(s, "\n")
+	hidden := 0
+	if !expanded && len(lines) > outputClip {
+		hidden = len(lines) - outputClip
+		lines = lines[:outputClip]
+	}
+	for i, l := range lines {
+		if lipgloss.Width(l) > width {
+			l = truncate(l, width)
+		}
+		prefix := "    "
+		if i == 0 {
+			prefix = "  └ "
+		}
+		lines[i] = t.Faint.Render(prefix) + t.ToolOut.Render(l)
+	}
+	if hidden > 0 {
+		lines = append(lines, t.Faint.Render(fmt.Sprintf("    … +%d lines (ctrl+o to expand)", hidden)))
+	}
+	return strings.Join(lines, "\n")
+}
+
+// renderEdit draws file changes flat: one line for a single file, a
+// hanging list when the brain touched several.
+func renderEdit(rc renderCtx, edit waggle.Edit) (string, bool) {
+	t := rc.th
+	inner := rc.width - 10
+	if inner < 20 {
+		inner = 20
+	}
+	running := edit.Status == "in_progress"
+	if running && len(edit.Changes) == 0 {
+		return "", false
+	}
+	icon := t.ToolOK.Render("✓")
+	if running {
+		icon = t.Brain.Render(rc.frame)
+	}
+	head := icon + " " + t.ToolCmd.Render("edit")
+	if len(edit.Changes) == 1 {
+		c := edit.Changes[0]
+		return head + "  " + opBadge(t, c.Op) + " " + t.EditPath.Render(truncate(c.Path, inner)), !running
+	}
+	head += t.ToolDur.Render(fmt.Sprintf("  %d files", len(edit.Changes)))
+	var b strings.Builder
+	b.WriteString(head)
+	for i, c := range edit.Changes {
+		prefix := "    "
+		if i == 0 {
+			prefix = "  └ "
+		}
+		b.WriteString("\n" + t.Faint.Render(prefix) + opBadge(t, c.Op) + " " + t.EditPath.Render(truncate(c.Path, inner)))
+	}
+	return b.String(), !running
+}
+
+// renderPlan draws the brain's checklist flat: done steps get a check, the
+// first open step is the current one and gets the arrow.
+func renderPlan(rc renderCtx, plan waggle.Plan) string {
 	t := rc.th
 	inner := rc.width - 6
 	if inner < 20 {
 		inner = 20
 	}
-	head := t.ToolCmd.Render("$ " + truncate(sanitize(tool.Command), inner))
-
-	if tool.Status == "in_progress" {
-		dur := t.ToolDur.Render(" " + rc.now.Sub(it.start).Round(time.Second).String())
-		body := head + "\n" + t.Brain.Render(rc.frame) + t.Faint.Render(" running") + dur
-		return t.ToolRun.Width(rc.width - 2).Render(body), false
-	}
-
-	badge := t.ToolOK.Render("ok")
-	if tool.ExitCode != nil && *tool.ExitCode != 0 {
-		badge = t.ToolBad.Render(fmt.Sprintf("exit %d", *tool.ExitCode))
-	}
-	dur := ""
-	if !it.start.IsZero() && it.ev.At.After(it.start) {
-		dur = t.ToolDur.Render(" " + it.ev.At.Sub(it.start).Round(10*time.Millisecond).String())
-	}
-	body := head + "  " + badge + dur
-	if out := strings.TrimSpace(sanitize(tool.Output)); out != "" {
-		lines := 6
-		if rc.expanded {
-			lines = 1000
+	done := 0
+	for _, it := range plan.Items {
+		if it.Done {
+			done++
 		}
-		body += "\n" + t.ToolOut.Render(clipLines(out, lines, inner))
 	}
-	// Expanded state is part of the cache key via the frozen bit: the
-	// model unfreezes tool cards when the user toggles ctrl+o.
-	return t.ToolBox.Width(rc.width - 2).Render(body), true
+	var b strings.Builder
+	b.WriteString(t.Brain.Render("●") + " " + t.Title.Render("plan") + t.ToolDur.Render(fmt.Sprintf("  %d/%d", done, len(plan.Items))))
+	current := true
+	for _, it := range plan.Items {
+		b.WriteString("\n  ")
+		switch {
+		case it.Done:
+			b.WriteString(t.ToolOK.Render("✓ ") + t.Faint.Render(truncate(it.Text, inner)))
+		case current:
+			b.WriteString(t.Brain.Render("→ ") + truncate(it.Text, inner))
+			current = false
+		default:
+			b.WriteString(t.Faint.Render("○ " + truncate(it.Text, inner)))
+		}
+	}
+	return b.String()
 }
 
 func opBadge(t theme, op string) string {
@@ -258,22 +343,4 @@ func truncate(s string, n int) string {
 		return "…"
 	}
 	return string(r[:n-1]) + "…"
-}
-
-func clipLines(s string, maxLines, width int) string {
-	lines := strings.Split(s, "\n")
-	clipped := len(lines) > maxLines
-	if clipped {
-		lines = lines[:maxLines]
-	}
-	for i, l := range lines {
-		if lipgloss.Width(l) > width {
-			lines[i] = truncate(l, width)
-		}
-	}
-	out := strings.Join(lines, "\n")
-	if clipped {
-		out += "\n…"
-	}
-	return out
 }

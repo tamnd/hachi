@@ -61,8 +61,10 @@ type model struct {
 	working  bool
 	steering bool // turn stopped by esc, next send resumes
 	started  time.Time
-	tokens   waggle.Cost
-	expanded bool // tool output expanded
+	verb     string      // this turn's working verb
+	tokens   waggle.Cost // settled usage, accumulated across turns
+	live     waggle.Cost // running usage of the current turn, replaced by pulses
+	expanded bool        // tool output expanded
 	errText  string
 	watch    <-chan waggle.Event
 	cancel   context.CancelFunc
@@ -235,6 +237,8 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.working = true
 		m.steering = false
 		m.started = time.Now()
+		m.verb = pickVerb(m.started)
+		m.live = waggle.Cost{}
 		m.errText = ""
 		return m, tick()
 
@@ -380,9 +384,18 @@ func (m *model) resetTranscript() {
 	m.byRef = map[string]int{}
 	m.lastSeq = 0
 	m.tokens = waggle.Cost{}
+	m.live = waggle.Cost{}
 	m.errText = ""
 	m.working = false
 	m.steering = false
+}
+
+// verbs are what the hive is doing while a turn runs. One is picked per
+// turn so the working line has some life without being noisy.
+var verbs = []string{"Buzzing", "Foraging", "Waggling", "Humming", "Pollinating", "Combing", "Swarming", "Dancing"}
+
+func pickVerb(t time.Time) string {
+	return verbs[int(t.UnixNano()/1000)%len(verbs)]
 }
 
 // apply folds one event into the transcript and status.
@@ -394,19 +407,27 @@ func (m *model) apply(ev waggle.Event) {
 	switch ev.Kind {
 	case waggle.KindCost:
 		if c, ok := decode[waggle.Cost](ev.Data); ok {
+			if c.Live {
+				// A pulse carries the whole turn so far; replace, never add.
+				m.live = c
+				return
+			}
 			m.tokens.InputTokens += c.InputTokens
 			m.tokens.CachedInputTokens += c.CachedInputTokens
 			m.tokens.OutputTokens += c.OutputTokens
 			m.tokens.ReasoningTokens += c.ReasoningTokens
+			m.live = waggle.Cost{}
 		}
 		return
 	case waggle.KindResult:
 		m.working = false
+		m.live = waggle.Cost{}
 		m.finishRunningCards()
 		m.refresh(m.vp.AtBottom())
 		return
 	case waggle.KindDied:
 		m.working = false
+		m.live = waggle.Cost{}
 	case waggle.KindMessage:
 		if ev.Bee == "human" {
 			m.working = true
@@ -414,8 +435,11 @@ func (m *model) apply(ev waggle.Event) {
 			if m.started.IsZero() {
 				m.started = time.Now()
 			}
+			if m.verb == "" {
+				m.verb = pickVerb(m.started)
+			}
 		}
-	case waggle.KindTool, waggle.KindEdit:
+	case waggle.KindTool, waggle.KindEdit, waggle.KindPlan:
 		if idx, ok := m.byRef[refKey(ev)]; ok {
 			prev := m.items[idx]
 			prev.ev = ev
@@ -441,6 +465,10 @@ func refKey(ev waggle.Event) string {
 	case waggle.KindEdit:
 		if e, ok := decode[waggle.Edit](ev.Data); ok && e.Ref != "" {
 			return ev.Bee + "/" + e.Ref
+		}
+	case waggle.KindPlan:
+		if p, ok := decode[waggle.Plan](ev.Data); ok && p.Ref != "" {
+			return ev.Bee + "/" + p.Ref
 		}
 	}
 	return ""
@@ -486,7 +514,7 @@ func (m *model) layout() {
 	}
 	m.ta.SetWidth(m.w - 4) // composer border + padding
 	m.vp.SetWidth(m.w)
-	h := m.h - m.ta.Height() - 5 // header + composer box + status
+	h := m.h - m.ta.Height() - 6 // header + activity + composer box + status
 	if h < 1 {
 		h = 1
 	}
@@ -542,7 +570,25 @@ func (m *model) viewChat() string {
 		body = m.viewWelcome()
 	}
 	composer := m.th.Composer.Width(m.w - 2).Render(m.ta.View())
-	return m.viewHeader() + "\n" + body + "\n" + composer + "\n" + m.viewStatus()
+	return m.viewHeader() + "\n" + body + "\n" + m.viewActivity() + "\n" + composer + "\n" + m.viewStatus()
+}
+
+// viewActivity is the line above the composer: alive while a turn runs,
+// with elapsed time and tokens streaming in; the steer prompt after esc.
+func (m *model) viewActivity() string {
+	switch {
+	case m.working:
+		s := " " + m.spin.View() + " " + m.th.Brain.Render(m.verb+"…")
+		parts := []string{time.Since(m.started).Round(time.Second).String()}
+		if out := m.live.OutputTokens + m.live.ReasoningTokens; out > 0 {
+			parts = append(parts, "↓ "+compact(out)+" tokens")
+		}
+		parts = append(parts, "esc to interrupt")
+		return s + m.th.Faint.Render(" ("+strings.Join(parts, " · ")+")")
+	case m.steering:
+		return " " + m.th.StatusKey.Render("interrupted") + m.th.Faint.Render(" · tell the hive where to go next")
+	}
+	return ""
 }
 
 func (m *model) viewHeader() string {
@@ -573,20 +619,18 @@ func (m *model) viewStatus() string {
 	var left string
 	switch {
 	case m.errText != "":
-		left = " " + m.th.ToolBad.Render(truncate(m.errText, m.w/2))
+		left = " " + m.th.ToolBad.Render("× "+truncate(m.errText, m.w/2))
 	case m.working:
-		left = " " + m.spin.View() + m.th.StatusBar.Render(
-			fmt.Sprintf(" working %s", time.Since(m.started).Round(time.Second)))
-	case m.steering:
-		left = " " + m.th.StatusKey.Render("stopped") + m.th.StatusBar.Render(" · say where to go next")
+		left = " " + m.th.Brain.Render("●") + m.th.StatusBar.Render(" working")
 	default:
-		left = " " + m.th.StatusBar.Render("idle")
+		left = " " + m.th.Faint.Render("○") + m.th.StatusBar.Render(" idle")
 	}
-	if m.tokens.InputTokens+m.tokens.OutputTokens > 0 {
-		left += m.th.StatusBar.Render(fmt.Sprintf("  %s in · %s out",
-			compact(m.tokens.InputTokens), compact(m.tokens.OutputTokens)))
-		if m.tokens.CachedInputTokens > 0 {
-			left += m.th.StatusBar.Render(fmt.Sprintf(" · %s cached", compact(m.tokens.CachedInputTokens)))
+	in := m.tokens.InputTokens + m.live.InputTokens
+	out := m.tokens.OutputTokens + m.tokens.ReasoningTokens + m.live.OutputTokens + m.live.ReasoningTokens
+	if in+out > 0 {
+		left += m.th.StatusBar.Render(fmt.Sprintf("  ·  ↑ %s ↓ %s", compact(in), compact(out)))
+		if cached := m.tokens.CachedInputTokens + m.live.CachedInputTokens; cached > 0 && in > 0 {
+			left += m.th.StatusBar.Render(fmt.Sprintf(" · %d%% cached", cached*100/in))
 		}
 	}
 	help := m.th.StatusKey.Render("enter") + m.th.Faint.Render(" send  ") +
