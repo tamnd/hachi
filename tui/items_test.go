@@ -148,16 +148,21 @@ func TestApplyCostAccumulates(t *testing.T) {
 	}
 }
 
-// TestApplyLivePulse checks that live snapshots replace each other and the
-// settled cost at turn end never double counts what pulses already showed.
-func TestApplyLivePulse(t *testing.T) {
+// TestApplyPulse checks that pulses replace each other and the settled
+// cost at turn end never double counts what pulses already showed, while
+// the slow-moving vitals (model, context, limits) survive the settle.
+func TestApplyPulse(t *testing.T) {
 	m := newModel(nil, Options{})
-	m.apply(waggle.Event{Seq: 1, Kind: waggle.KindCost, At: time.Now(),
-		Data: waggle.Enc(waggle.Cost{InputTokens: 100, OutputTokens: 10, Live: true})})
-	m.apply(waggle.Event{Seq: 2, Kind: waggle.KindCost, At: time.Now(),
-		Data: waggle.Enc(waggle.Cost{InputTokens: 250, OutputTokens: 30, Live: true})})
-	if m.live.InputTokens != 250 || m.live.OutputTokens != 30 {
-		t.Fatalf("live pulse must replace, not add: %+v", m.live)
+	m.apply(waggle.Event{Seq: 1, Kind: waggle.KindPulse, At: time.Now(),
+		Data: waggle.Enc(waggle.Pulse{Usage: waggle.Cost{InputTokens: 100, OutputTokens: 10}})})
+	m.apply(waggle.Event{Seq: 2, Kind: waggle.KindPulse, At: time.Now(),
+		Data: waggle.Enc(waggle.Pulse{
+			Usage:   waggle.Cost{InputTokens: 250, OutputTokens: 30},
+			Context: 280, Window: 258400, Model: "gpt-5-codex", Effort: "low",
+			Limits: []waggle.Limit{{Name: "5h", UsedPct: 1}},
+		})})
+	if m.pulse.Usage.InputTokens != 250 || m.pulse.Usage.OutputTokens != 30 {
+		t.Fatalf("pulse must replace, not add: %+v", m.pulse.Usage)
 	}
 	if m.tokens.InputTokens != 0 {
 		t.Fatalf("pulses must not touch settled tokens: %+v", m.tokens)
@@ -167,7 +172,39 @@ func TestApplyLivePulse(t *testing.T) {
 	if m.tokens.InputTokens != 260 || m.tokens.OutputTokens != 32 {
 		t.Fatalf("settled cost wrong: %+v", m.tokens)
 	}
-	if m.live.InputTokens != 0 || m.live.OutputTokens != 0 {
-		t.Fatalf("settle must clear the live snapshot: %+v", m.live)
+	if m.pulse.Usage.InputTokens != 0 || m.pulse.Usage.OutputTokens != 0 {
+		t.Fatalf("settle must clear the pulse usage: %+v", m.pulse.Usage)
+	}
+	if m.pulse.Model != "gpt-5-codex" || m.pulse.Window != 258400 || len(m.pulse.Limits) != 1 {
+		t.Fatalf("settle must keep the slow vitals: %+v", m.pulse)
+	}
+}
+
+// TestApplyLegacyLiveCost keeps older journals rendering: live cost
+// snapshots predate pulses and must still replace, never accumulate.
+func TestApplyLegacyLiveCost(t *testing.T) {
+	m := newModel(nil, Options{})
+	m.apply(waggle.Event{Seq: 1, Kind: waggle.KindCost, At: time.Now(),
+		Data: waggle.Enc(waggle.Cost{InputTokens: 100, OutputTokens: 10, Live: true})})
+	m.apply(waggle.Event{Seq: 2, Kind: waggle.KindCost, At: time.Now(),
+		Data: waggle.Enc(waggle.Cost{InputTokens: 250, OutputTokens: 30, Live: true})})
+	if m.pulse.Usage.InputTokens != 250 || m.tokens.InputTokens != 0 {
+		t.Fatalf("legacy live cost handled wrong: pulse=%+v settled=%+v", m.pulse.Usage, m.tokens)
+	}
+}
+
+// TestVitalsInStatus checks the status bar carries the pulse vitals.
+func TestVitalsInStatus(t *testing.T) {
+	m := newModel(nil, Options{})
+	m.w, m.h = 160, 40
+	m.pulse = waggle.Pulse{
+		Context: 51680, Window: 258400, Model: "gpt-5-codex", Effort: "low",
+		Limits: []waggle.Limit{{Name: "5h", UsedPct: 1}, {Name: "week", UsedPct: 85}},
+	}
+	s := m.viewStatus()
+	for _, want := range []string{"gpt-5-codex low", "20% context", "5h 1%", "week 85%"} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("status bar missing %q:\n%s", want, s)
+		}
 	}
 }

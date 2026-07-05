@@ -47,25 +47,33 @@ func (d *Driver) Detect() error {
 	return err
 }
 
+// runArgs builds the codex exec invocation for one turn. Two properties
+// matter for cost: every follow-up turn resumes the stored thread, and the
+// flags never vary between turns. Both keep the conversation prefix
+// byte-identical so the provider's prompt cache keeps serving it; a fresh
+// thread or a changed profile would re-bill the whole history as uncached
+// input.
+func (d *Driver) runArgs(resume, msg string) []string {
+	// The resume subcommand only takes --json and --skip-git-repo-check;
+	// sandbox flags belong to exec and must come before it.
+	sandbox := []string{"--sandbox", "workspace-write", "-c", "sandbox_workspace_write.network_access=true"}
+	common := []string{"--json", "--skip-git-repo-check"}
+	args := append([]string{"exec"}, sandbox...)
+	if resume != "" {
+		args = append(args, "resume", resume)
+	}
+	args = append(args, common...)
+	args = append(args, d.Args...)
+	return append(args, msg)
+}
+
 // Run starts one turn: a fresh thread when sess.Resume is empty, otherwise
 // codex exec resume with the stored thread id. The sandbox is
 // workspace-write with network on: exec mode cannot ask for approval, and
 // a brain that cannot fetch a dependency or push a branch is not doing
 // real work. Anything outside the workspace stays off limits.
 func (d *Driver) Run(ctx context.Context, sess adapter.Session, msg string) (adapter.Stream, error) {
-	// The resume subcommand only takes --json and --skip-git-repo-check;
-	// sandbox flags belong to exec and must come before it.
-	sandbox := []string{"--sandbox", "workspace-write", "-c", "sandbox_workspace_write.network_access=true"}
-	common := []string{"--json", "--skip-git-repo-check"}
-	args := append([]string{"exec"}, sandbox...)
-	if sess.Resume != "" {
-		args = append(args, "resume", sess.Resume)
-	}
-	args = append(args, common...)
-	args = append(args, d.Args...)
-	args = append(args, msg)
-
-	cmd := exec.CommandContext(ctx, d.Bin, args...)
+	cmd := exec.CommandContext(ctx, d.Bin, d.runArgs(sess.Resume, msg)...)
 	cmd.Dir = sess.Dir
 	cmd.WaitDelay = 5 * time.Second
 	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
@@ -112,9 +120,9 @@ func (d *Driver) Run(ctx context.Context, sess adapter.Session, msg string) (ada
 						pulses.Add(1)
 						go func() {
 							defer pulses.Done()
-							tailTokens(pctx, d.sessionsRoot(), sp.Resume, fromStart, func(c waggle.Cost) {
+							tailRollout(pctx, d.sessionsRoot(), sp.Resume, fromStart, func(pu waggle.Pulse) {
 								select {
-								case s.ch <- p.event(waggle.KindCost, waggle.Enc(c)):
+								case s.ch <- p.event(waggle.KindPulse, waggle.Enc(pu)):
 								case <-pctx.Done():
 								}
 							})

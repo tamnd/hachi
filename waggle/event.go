@@ -30,6 +30,10 @@ const (
 	KindPlan Kind = "plan"
 	// KindNeedInput means the run is blocked on the human.
 	KindNeedInput Kind = "need_input"
+	// KindPulse is a periodic snapshot of a running brain's vitals, read
+	// from whatever the brain writes on disk while it works. Each pulse
+	// carries the whole picture so far and replaces the previous one.
+	KindPulse Kind = "pulse"
 	// KindCost carries token usage for a completed turn.
 	KindCost Kind = "cost"
 	// KindResult marks a turn finishing cleanly.
@@ -104,10 +108,32 @@ type Plan struct {
 	Items []PlanItem `json:"items"`
 }
 
-// Cost is the payload for KindCost. A turn settles with one Cost at the
-// end; while it runs an adapter may also emit Live snapshots carrying the
-// usage so far. Live snapshots replace each other instead of accumulating,
-// so clients can show download progress without double counting.
+// Pulse is the payload for KindPulse. Usage counts the turn so far and
+// mirrors what the settled Cost will say; Context and Window describe how
+// full the model's context is right now; Limits are the provider's
+// rate-limit meters when the brain reports them. Any field the brain does
+// not know stays zero.
+type Pulse struct {
+	Usage   Cost    `json:"usage"`
+	Context int64   `json:"context,omitempty"` // tokens sitting in the model's window
+	Window  int64   `json:"window,omitempty"`  // the window's total size
+	Model   string  `json:"model,omitempty"`
+	Effort  string  `json:"effort,omitempty"`
+	Limits  []Limit `json:"limits,omitempty"`
+}
+
+// Limit is one provider rate-limit meter, like the 5h and weekly windows
+// on a subscription plan.
+type Limit struct {
+	Name     string    `json:"name"`
+	UsedPct  float64   `json:"used_pct"`
+	ResetsAt time.Time `json:"resets_at,omitzero"`
+}
+
+// Cost is the payload for KindCost: token usage settled at the end of a
+// turn. Costs accumulate across turns. Live marks an in-flight snapshot
+// rather than a settled total; adapters emit KindPulse for that now, and
+// the field stays so older journals replay without double counting.
 type Cost struct {
 	InputTokens       int64 `json:"input_tokens"`
 	CachedInputTokens int64 `json:"cached_input_tokens"`
