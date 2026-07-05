@@ -105,7 +105,7 @@ func (d *Driver) Run(ctx context.Context, sess adapter.Session, msg string) (ada
 			pcancel()
 			pulses.Wait()
 		}()
-		p := parser{sess: sess.ID, bee: name}
+		p := parser{sess: sess.ID, bee: name, merge: newPatchMerge()}
 		pulsing := false
 		sc := bufio.NewScanner(stdout)
 		sc.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
@@ -124,6 +124,14 @@ func (d *Driver) Run(ctx context.Context, sess adapter.Session, msg string) (ada
 								select {
 								case s.ch <- p.event(waggle.KindPulse, waggle.Enc(pu)):
 								case <-pctx.Done():
+								}
+							}, func(diffs map[string]string) {
+								for _, e := range p.merge.apply(diffs) {
+									select {
+									case s.ch <- p.event(waggle.KindEdit, waggle.Enc(e)):
+									case <-pctx.Done():
+										return
+									}
 								}
 							})
 						}()
@@ -215,9 +223,10 @@ func (s *stream) Stop(ctx context.Context) error {
 // seq is atomic because the pulse goroutine stamps events concurrently
 // with the stdout parse loop.
 type parser struct {
-	sess waggle.SessionID
-	bee  string
-	seq  atomic.Uint64
+	sess  waggle.SessionID
+	bee   string
+	seq   atomic.Uint64
+	merge *patchMerge
 }
 
 type codexLine struct {
@@ -316,6 +325,9 @@ func (p *parser) item(l codexLine) []waggle.Event {
 		for _, c := range it.Changes {
 			e.Changes = append(e.Changes, waggle.FileChange{Path: c.Path, Op: c.Kind})
 		}
+		// The rollout tail may already hold this card's diffs, or will
+		// deliver them moments after the card appears.
+		p.merge.fold(&e)
 		return []waggle.Event{p.event(waggle.KindEdit, waggle.Enc(e))}
 	case "mcp_tool_call", "web_search":
 		t := waggle.Tool{Ref: it.ID, Command: it.Type, Status: it.Status}

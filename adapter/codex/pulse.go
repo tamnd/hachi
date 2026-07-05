@@ -58,14 +58,21 @@ func findRollout(ctx context.Context, root, thread string) string {
 
 // rolloutLine covers the rollout lines the tail cares about: turn_context
 // rows carry the model and effort, token_count rows carry usage, the
-// context window, and rate limits.
+// context window, and rate limits, patch_apply_end rows carry the actual
+// file contents behind an edit.
 type rolloutLine struct {
 	Type    string `json:"type"`
 	Payload struct {
-		Type   string `json:"type"`
-		Model  string `json:"model"`
-		Effort string `json:"effort"`
-		Info   struct {
+		Type    string `json:"type"`
+		Model   string `json:"model"`
+		Effort  string `json:"effort"`
+		Success *bool  `json:"success"`
+		Changes map[string]struct {
+			Type        string `json:"type"`
+			Content     string `json:"content"`
+			UnifiedDiff string `json:"unified_diff"`
+		} `json:"changes"`
+		Info struct {
 			Window int64 `json:"model_context_window"`
 			Last   struct {
 				Input     int64 `json:"input_tokens"`
@@ -87,12 +94,13 @@ type rolloutWindow struct {
 	ResetsAt      int64   `json:"resets_at"`
 }
 
-// tailRollout follows the rollout log and calls emit with the brain's
-// vitals each time codex records more. A fresh thread reads the file from
-// the start (everything in it belongs to this turn); a resumed one starts
-// at the current end so old turns are not recounted. Returns when ctx is
+// tailRollout follows the rollout log, calling emit with the brain's
+// vitals each time codex records more and onPatch with the diffs behind
+// each applied patch. A fresh thread reads the file from the start
+// (everything in it belongs to this turn); a resumed one starts at the
+// current end so old turns are not recounted. Returns when ctx is
 // canceled.
-func tailRollout(ctx context.Context, root, thread string, fromStart bool, emit func(waggle.Pulse)) {
+func tailRollout(ctx context.Context, root, thread string, fromStart bool, emit func(waggle.Pulse), onPatch func(map[string]string)) {
 	path := findRollout(ctx, root, thread)
 	if path == "" {
 		return
@@ -139,6 +147,9 @@ func tailRollout(ctx context.Context, root, thread string, fromStart bool, emit 
 			}
 			if fold(&p, rl) {
 				changed = true
+			}
+			if d := patchDiffs(rl); len(d) > 0 && onPatch != nil {
+				onPatch(d)
 			}
 		}
 		if changed {
@@ -196,6 +207,24 @@ func fold(p *waggle.Pulse, rl rolloutLine) bool {
 		return changed
 	}
 	return false
+}
+
+// patchDiffs extracts display diffs from a patch_apply_end line, keyed by
+// path. Failed patches carry nothing worth showing.
+func patchDiffs(rl rolloutLine) map[string]string {
+	if rl.Type != "event_msg" || rl.Payload.Type != "patch_apply_end" || len(rl.Payload.Changes) == 0 {
+		return nil
+	}
+	if rl.Payload.Success != nil && !*rl.Payload.Success {
+		return nil
+	}
+	out := map[string]string{}
+	for path, c := range rl.Payload.Changes {
+		if d := patchDiff(c.Type, c.Content, c.UnifiedDiff); d != "" {
+			out[path] = d
+		}
+	}
+	return out
 }
 
 // limitName turns a rate-limit window length into the label a human would

@@ -208,3 +208,28 @@ func TestVitalsInStatus(t *testing.T) {
 		}
 	}
 }
+
+// TestRenderEditDiff checks the diff hanging under an edit card: colored
+// +/- lines, the +N -M tally, and clipping past the output limit.
+func TestRenderEditDiff(t *testing.T) {
+	rc := renderCtx{th: newTheme(true), md: newMDCache(true), width: 100, frame: "⠋", now: time.Now()}
+	long := "@@ -1 +1,9 @@\n-old\n+one\n+two\n+three\n+four\n+five\n+six\n+seven\n+eight"
+	it := &item{ev: waggle.Event{Kind: waggle.KindEdit, Data: waggle.Enc(waggle.Edit{
+		Ref: "item_9", Status: "completed",
+		Changes: []waggle.FileChange{{Path: "scripts/hello.sh", Op: "update", Diff: long}},
+	})}}
+	s := it.render(rc)
+	for _, want := range []string{"+8", "-1", "@@ -1 +1,9 @@", "ctrl+o to expand"} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("edit diff card missing %q:\n%s", want, s)
+		}
+	}
+	if strings.Contains(s, "+eight") {
+		t.Fatalf("collapsed diff must clip:\n%s", s)
+	}
+	it.frozen = false // what ctrl+o does via unfreezeClipped
+	expanded := it.render(renderCtx{th: rc.th, md: rc.md, width: 100, frame: rc.frame, expanded: true, now: rc.now})
+	if !strings.Contains(expanded, "+eight") || strings.Contains(expanded, "ctrl+o to expand") {
+		t.Fatalf("expanded diff must show everything:\n%s", expanded)
+	}
+}

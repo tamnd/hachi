@@ -210,7 +210,8 @@ func hangOutput(t theme, s string, expanded bool, width int) string {
 }
 
 // renderEdit draws file changes flat: one line for a single file, a
-// hanging list when the brain touched several.
+// hanging list when the brain touched several, and the diff hanging under
+// each path once the brain reports one.
 func renderEdit(rc renderCtx, edit waggle.Edit) (string, bool) {
 	t := rc.th
 	inner := rc.width - 10
@@ -228,7 +229,11 @@ func renderEdit(rc renderCtx, edit waggle.Edit) (string, bool) {
 	head := icon + " " + t.ToolCmd.Render("edit")
 	if len(edit.Changes) == 1 {
 		c := edit.Changes[0]
-		return head + "  " + opBadge(t, c.Op) + " " + t.EditPath.Render(truncate(c.Path, inner)), !running
+		line := head + "  " + opBadge(t, c.Op) + " " + t.EditPath.Render(truncate(c.Path, inner)) + diffStat(t, c.Diff)
+		if d := hangDiff(t, c.Diff, rc.expanded, inner); d != "" {
+			line += "\n" + d
+		}
+		return line, !running
 	}
 	head += t.ToolDur.Render(fmt.Sprintf("  %d files", len(edit.Changes)))
 	var b strings.Builder
@@ -238,9 +243,68 @@ func renderEdit(rc renderCtx, edit waggle.Edit) (string, bool) {
 		if i == 0 {
 			prefix = "  └ "
 		}
-		b.WriteString("\n" + t.Faint.Render(prefix) + opBadge(t, c.Op) + " " + t.EditPath.Render(truncate(c.Path, inner)))
+		b.WriteString("\n" + t.Faint.Render(prefix) + opBadge(t, c.Op) + " " + t.EditPath.Render(truncate(c.Path, inner)) + diffStat(t, c.Diff))
 	}
 	return b.String(), !running
+}
+
+// diffStat is the +N -M tally after a path, counted from its diff lines.
+func diffStat(t theme, diff string) string {
+	if diff == "" {
+		return ""
+	}
+	var add, del int
+	for _, l := range strings.Split(diff, "\n") {
+		switch {
+		case strings.HasPrefix(l, "+"):
+			add++
+		case strings.HasPrefix(l, "-"):
+			del++
+		}
+	}
+	if add+del == 0 {
+		return ""
+	}
+	return "  " + t.EditAdd.Render(fmt.Sprintf("+%d", add)) + " " + t.EditDel.Render(fmt.Sprintf("-%d", del))
+}
+
+// hangDiff indents diff lines under an edit card, coloring additions,
+// deletions, and hunk headers, clipped like tool output.
+func hangDiff(t theme, diff string, expanded bool, width int) string {
+	if diff == "" {
+		return ""
+	}
+	lines := strings.Split(sanitize(diff), "\n")
+	hidden := 0
+	if !expanded && len(lines) > outputClip {
+		hidden = len(lines) - outputClip
+		lines = lines[:outputClip]
+	}
+	for i, l := range lines {
+		if lipgloss.Width(l) > width {
+			l = truncate(l, width)
+		}
+		var body string
+		switch {
+		case strings.HasPrefix(l, "+"):
+			body = t.EditAdd.Render(l)
+		case strings.HasPrefix(l, "-"):
+			body = t.EditDel.Render(l)
+		case strings.HasPrefix(l, "@@"):
+			body = t.Faint.Render(l)
+		default:
+			body = t.ToolOut.Render(l)
+		}
+		prefix := "    "
+		if i == 0 {
+			prefix = "  └ "
+		}
+		lines[i] = t.Faint.Render(prefix) + body
+	}
+	if hidden > 0 {
+		lines = append(lines, t.Faint.Render(fmt.Sprintf("    … +%d lines (ctrl+o to expand)", hidden)))
+	}
+	return strings.Join(lines, "\n")
 }
 
 // renderPlan draws the brain's checklist flat: done steps get a check, the

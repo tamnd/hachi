@@ -44,7 +44,7 @@ func TestTailRollout(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	got := make(chan waggle.Pulse, 16)
-	go tailRollout(ctx, root, "threadx", true, func(p waggle.Pulse) { got <- p })
+	go tailRollout(ctx, root, "threadx", true, func(p waggle.Pulse) { got <- p }, nil)
 
 	first := recvPulse(t, got)
 	u := first.Usage
@@ -99,7 +99,7 @@ func TestTailRolloutResumeSkipsHistory(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	got := make(chan waggle.Pulse, 16)
-	go tailRollout(ctx, root, "thready", false, func(p waggle.Pulse) { got <- p })
+	go tailRollout(ctx, root, "thready", false, func(p waggle.Pulse) { got <- p }, nil)
 
 	// Give the tailer time to open the file and settle past the history.
 	time.Sleep(700 * time.Millisecond)
