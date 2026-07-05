@@ -153,8 +153,13 @@ func (e *Engine) pump(id waggle.SessionID, m journal.Meta, t *turn) {
 		switch ev.Kind {
 		case waggle.KindSpawned:
 			var sp waggle.Spawned
-			if err := decode(ev.Data, &sp); err == nil && sp.Resume != "" {
+			if err := decode(ev.Data, &sp); err == nil && sp.Resume != "" && sp.Resume != m.Resume {
+				// Persist the resume handle now, not at turn end: if the
+				// process dies mid-turn the next Send must still resume
+				// this thread. Losing the handle would start a fresh one
+				// and re-bill the whole history as uncached input.
 				m.Resume = sp.Resume
+				_ = e.Journal.SaveMeta(m)
 			}
 		case waggle.KindDied:
 			final = hive.StateDied
