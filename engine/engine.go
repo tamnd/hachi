@@ -108,6 +108,7 @@ func (e *Engine) Send(ctx context.Context, id waggle.SessionID, msg string) erro
 	if err != nil {
 		return fmt.Errorf("engine: unknown session %s: %w", id, err)
 	}
+	e.ensureSeq(id)
 	e.mu.Lock()
 	if _, busy := e.running[id]; busy {
 		e.mu.Unlock()
@@ -237,6 +238,35 @@ func (e *Engine) Stop(ctx context.Context, id waggle.SessionID) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// ensureSeq seeds the in-memory sequence counter from the journal the
+// first time a process appends to a session. Without this a reopened
+// session would restart at one, collide with the sequence numbers
+// already on disk, and clients deduplicating on seq would silently drop
+// every new event after replay.
+func (e *Engine) ensureSeq(id waggle.SessionID) {
+	e.mu.Lock()
+	_, ok := e.seq[id]
+	e.mu.Unlock()
+	if ok {
+		return
+	}
+	past, err := e.Journal.Replay(id)
+	if err != nil {
+		return
+	}
+	var last uint64
+	for _, ev := range past {
+		if ev.Seq > last {
+			last = ev.Seq
+		}
+	}
+	e.mu.Lock()
+	if _, ok := e.seq[id]; !ok {
+		e.seq[id] = last
+	}
+	e.mu.Unlock()
 }
 
 // append assigns the session sequence number, persists, and fans out.
