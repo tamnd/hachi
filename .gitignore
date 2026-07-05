@@ -1,0 +1,5 @@
+hachi
+/dist/
+*.test
+*.out
+.DS_Store
