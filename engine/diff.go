@@ -39,6 +39,13 @@ func (e *Engine) Changes(ctx context.Context, id waggle.SessionID) ([]hive.FileD
 	if err != nil {
 		return nil, err
 	}
+	// Staged is hachi's own accepted-mark, kept in the manifest; git's
+	// index state is not consulted so a user's own git add stays theirs.
+	for i := range out {
+		if en := b.byPath[out[i].Path]; en != nil && en.Staged {
+			out[i].Staged = true
+		}
+	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
 	return out, nil
 }

@@ -71,6 +71,7 @@ type ManifestEntry struct {
 	LinkTarget  string      `json:"link_target,omitempty"`
 	Snapshotted bool        `json:"snapshotted"`
 	Blob        string      `json:"blob,omitempty"`
+	Staged      bool        `json:"staged,omitempty"` // accepted through hachi: git-staged, or kept in non-git mode
 
 	// Filled in as the agent works: what the file looked like when the
 	// last edit event for it completed. Empty SHA with a set MTime means
