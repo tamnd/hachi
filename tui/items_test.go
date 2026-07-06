@@ -112,12 +112,12 @@ func TestApplyRefCorrelation(t *testing.T) {
 	m.w, m.h = 100, 40
 	m.layout()
 
-	m.apply(waggle.Event{Seq: 1, Bee: "codex", Kind: waggle.KindTool, At: time.Now(),
+	m.apply(m.sview, waggle.Event{Seq: 1, Bee: "codex", Kind: waggle.KindTool, At: time.Now(),
 		Data: waggle.Enc(waggle.Tool{Ref: "item_0", Command: "make", Status: "in_progress"})})
 	if len(m.items) != 1 {
 		t.Fatalf("expected 1 item, got %d", len(m.items))
 	}
-	m.apply(waggle.Event{Seq: 2, Bee: "codex", Kind: waggle.KindTool, At: time.Now(),
+	m.apply(m.sview, waggle.Event{Seq: 2, Bee: "codex", Kind: waggle.KindTool, At: time.Now(),
 		Data: waggle.Enc(waggle.Tool{Ref: "item_0", Command: "make", Status: "completed", ExitCode: intp(0), Output: "done"})})
 	if len(m.items) != 1 {
 		t.Fatalf("completed event with same ref must update in place; got %d items", len(m.items))
@@ -128,7 +128,7 @@ func TestApplyRefCorrelation(t *testing.T) {
 	}
 
 	// A different ref appends.
-	m.apply(waggle.Event{Seq: 3, Bee: "codex", Kind: waggle.KindTool, At: time.Now(),
+	m.apply(m.sview, waggle.Event{Seq: 3, Bee: "codex", Kind: waggle.KindTool, At: time.Now(),
 		Data: waggle.Enc(waggle.Tool{Ref: "item_1", Command: "ls", Status: "in_progress"})})
 	if len(m.items) != 2 {
 		t.Fatalf("new ref should append; got %d items", len(m.items))
@@ -140,7 +140,7 @@ func TestApplyRefCorrelation(t *testing.T) {
 func TestApplyCostAccumulates(t *testing.T) {
 	m := newModel(nil, Options{})
 	for i := 0; i < 2; i++ {
-		m.apply(waggle.Event{Seq: uint64(10 + i), Kind: waggle.KindCost, At: time.Now(),
+		m.apply(m.sview, waggle.Event{Seq: uint64(10 + i), Kind: waggle.KindCost, At: time.Now(),
 			Data: waggle.Enc(waggle.Cost{InputTokens: 100, CachedInputTokens: 40, OutputTokens: 7})})
 	}
 	if m.tokens.InputTokens != 200 || m.tokens.CachedInputTokens != 80 || m.tokens.OutputTokens != 14 {
@@ -153,9 +153,9 @@ func TestApplyCostAccumulates(t *testing.T) {
 // the slow-moving vitals (model, context, limits) survive the settle.
 func TestApplyPulse(t *testing.T) {
 	m := newModel(nil, Options{})
-	m.apply(waggle.Event{Seq: 1, Kind: waggle.KindPulse, At: time.Now(),
+	m.apply(m.sview, waggle.Event{Seq: 1, Kind: waggle.KindPulse, At: time.Now(),
 		Data: waggle.Enc(waggle.Pulse{Usage: waggle.Cost{InputTokens: 100, OutputTokens: 10}})})
-	m.apply(waggle.Event{Seq: 2, Kind: waggle.KindPulse, At: time.Now(),
+	m.apply(m.sview, waggle.Event{Seq: 2, Kind: waggle.KindPulse, At: time.Now(),
 		Data: waggle.Enc(waggle.Pulse{
 			Usage:   waggle.Cost{InputTokens: 250, OutputTokens: 30},
 			Context: 280, Window: 258400, Model: "gpt-5-codex", Effort: "low",
@@ -167,7 +167,7 @@ func TestApplyPulse(t *testing.T) {
 	if m.tokens.InputTokens != 0 {
 		t.Fatalf("pulses must not touch settled tokens: %+v", m.tokens)
 	}
-	m.apply(waggle.Event{Seq: 3, Kind: waggle.KindCost, At: time.Now(),
+	m.apply(m.sview, waggle.Event{Seq: 3, Kind: waggle.KindCost, At: time.Now(),
 		Data: waggle.Enc(waggle.Cost{InputTokens: 260, OutputTokens: 32})})
 	if m.tokens.InputTokens != 260 || m.tokens.OutputTokens != 32 {
 		t.Fatalf("settled cost wrong: %+v", m.tokens)
@@ -184,9 +184,9 @@ func TestApplyPulse(t *testing.T) {
 // snapshots predate pulses and must still replace, never accumulate.
 func TestApplyLegacyLiveCost(t *testing.T) {
 	m := newModel(nil, Options{})
-	m.apply(waggle.Event{Seq: 1, Kind: waggle.KindCost, At: time.Now(),
+	m.apply(m.sview, waggle.Event{Seq: 1, Kind: waggle.KindCost, At: time.Now(),
 		Data: waggle.Enc(waggle.Cost{InputTokens: 100, OutputTokens: 10, Live: true})})
-	m.apply(waggle.Event{Seq: 2, Kind: waggle.KindCost, At: time.Now(),
+	m.apply(m.sview, waggle.Event{Seq: 2, Kind: waggle.KindCost, At: time.Now(),
 		Data: waggle.Enc(waggle.Cost{InputTokens: 250, OutputTokens: 30, Live: true})})
 	if m.pulse.Usage.InputTokens != 250 || m.tokens.InputTokens != 0 {
 		t.Fatalf("legacy live cost handled wrong: pulse=%+v settled=%+v", m.pulse.Usage, m.tokens)
