@@ -55,7 +55,8 @@ type SessionInfo struct {
 
 	// Reason says why the session needs a human, when it does: "question"
 	// for an unanswered ask, "diff" for a finished run whose changes
-	// nobody has looked at, "died" for an unacknowledged death. Empty
+	// nobody has looked at, "stall" for a run quiet longer than its brain
+	// normally goes quiet, "died" for an unacknowledged death. Empty
 	// when nothing is raised. A raised reason is what moves State to
 	// needs; died sessions keep StateDied and carry the reason alongside.
 	Reason string
@@ -155,6 +156,11 @@ type Service interface {
 	// raised, because a question is cleared by answering, not by looking.
 	// Safe to call when nothing is raised; it does nothing.
 	Seen(ctx context.Context, id waggle.SessionID) error
+	// KeepWaiting answers a stall raise with patience: the raise clears
+	// and the session's quiet threshold doubles for the rest of the turn,
+	// so a known-slow run stops paging without turning detection off. A
+	// safe no-op when no stall is raised.
+	KeepWaiting(ctx context.Context, id waggle.SessionID) error
 	// MergeBack brings a worktree session's branch into the user's own
 	// checkout: fast-forward when possible, a real merge commit
 	// otherwise. It refuses while the checkout has uncommitted changes

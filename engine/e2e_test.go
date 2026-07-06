@@ -117,6 +117,7 @@ func TestRealCodexToolUse(t *testing.T) {
 		}
 	}
 done:
+	drain(t, e, info.ID)
 	if completedTools+completedEdits == 0 {
 		t.Fatal("agent produced no completed tool or edit events")
 	}
@@ -236,15 +237,24 @@ func turn(t *testing.T, e *engine.Engine, id waggle.SessionID, prompt, want stri
 		t.Fatal("no cost event")
 	}
 
-	// The turn must settle back to idle so the next Send is accepted.
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		if state(t, e, id) != hive.StateWorking {
-			return
-		}
-		time.Sleep(100 * time.Millisecond)
+	// The turn must fully wind down so the next Send is accepted and no
+	// end-of-turn write races the test's teardown.
+	drain(t, e, id)
+	if state(t, e, id) == hive.StateWorking {
+		t.Fatal("session stuck in working state after result")
 	}
-	t.Fatal("session stuck in working state after result")
+}
+
+// drain waits out the pump's end-of-turn writes. Stop keeps the turn
+// registered until the tail has landed, so it doubles as the barrier;
+// on a turn that already finished it returns at once.
+func drain(t *testing.T, e *engine.Engine, id waggle.SessionID) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := e.Stop(ctx, id); err != nil {
+		t.Fatalf("drain: %v", err)
+	}
 }
 
 func state(t *testing.T, e *engine.Engine, id waggle.SessionID) hive.State {
