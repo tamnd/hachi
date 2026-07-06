@@ -17,6 +17,7 @@ import (
 type muxSvc struct {
 	watches int
 	opened  int
+	waits   int
 	sent    []string
 }
 
@@ -54,6 +55,10 @@ func (f *muxSvc) Restore(context.Context, waggle.SessionID, []string) (hive.Rest
 }
 func (f *muxSvc) Queue(context.Context, waggle.SessionID, string) error { return nil }
 func (f *muxSvc) Seen(context.Context, waggle.SessionID) error          { return nil }
+func (f *muxSvc) KeepWaiting(context.Context, waggle.SessionID) error {
+	f.waits++
+	return nil
+}
 func (f *muxSvc) MergeBack(context.Context, waggle.SessionID) (hive.MergeReport, error) {
 	return hive.MergeReport{}, nil
 }

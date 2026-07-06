@@ -446,6 +446,13 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case sessionsMsg:
 		m.sessions = msg.list
+		for _, s := range msg.list {
+			// The focused session's raise rides the same poll: the stall
+			// notice above the composer needs it without a second fetch.
+			if s.ID == m.sess.ID && s.ID != "" {
+				m.sess.Reason, m.sess.Detail, m.sess.Raised = s.Reason, s.Detail, s.Raised
+			}
+		}
 		if m.cursor >= len(m.sessions) {
 			m.cursor = 0
 		}
@@ -538,6 +545,12 @@ func (m *model) key(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// d is a command and not the start of a sentence.
 		if m.ta.Value() == "" && !m.draft {
 			return m.openDiff()
+		}
+	case "w":
+		// Keep waiting: the stall's false-positive escape hatch, only a
+		// command while the notice is up and the composer is empty.
+		if m.ta.Value() == "" && !m.draft && m.sess.Reason == "stall" {
+			return m, m.keepWaiting()
 		}
 	case "enter":
 		text := strings.TrimSpace(m.ta.Value())
@@ -927,6 +940,14 @@ func (m *model) viewActivity() string {
 			m.th.StatusKey.Render("n") + m.th.Faint.Render(" cancel")
 	case m.waiting:
 		return " " + m.th.Faint.Render("◌ waiting for the folder · it starts when the other session is done")
+	case m.sess.Reason == "stall":
+		quiet := m.sess.Detail
+		if quiet == "" {
+			quiet = "quiet for a while"
+		}
+		return " " + m.th.ToolBad.Render("─ "+quiet+". the run may be stuck.") + "  " +
+			m.th.StatusKey.Render("esc") + m.th.Faint.Render(" steer · ") +
+			m.th.StatusKey.Render("w") + m.th.Faint.Render(" keep waiting ─")
 	case m.reqBanner != "" && !m.working:
 		return " " + m.th.StatusKey.Render(m.reqBanner) + m.th.Faint.Render(" · the diff rides along with your next message")
 	case m.working:

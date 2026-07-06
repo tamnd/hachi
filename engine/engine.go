@@ -32,6 +32,9 @@ type Engine struct {
 	queue    map[waggle.SessionID]string // parked messages waiting for their folder
 	dirty    map[waggle.SessionID]bool   // unaccepted changes on disk; what DiffReady reports
 	attn     map[waggle.SessionID]*attention
+	last     map[waggle.SessionID]time.Time // last stream event; what the stall clock measures from
+	boost    map[waggle.SessionID]uint      // per-turn keep-waiting presses; each one doubles N
+	gaps     map[string]*gapStats           // per-brain rhythm windows, loaded lazily
 	nonce    uint64
 
 	// wtMu serializes worktree creation so racing sends cannot pick the
@@ -42,14 +45,19 @@ type Engine struct {
 // turn is one in-flight run: its stream plus a channel that closes when
 // the pump has fully drained it.
 type turn struct {
-	stream adapter.Stream
-	done   chan struct{}
+	stream  adapter.Stream // nil until the adapter has started; guarded by Engine.mu
+	stopReq bool           // Stop arrived before the stream existed; guarded by Engine.mu
+	done    chan struct{}
 }
 
 var _ hive.Service = (*Engine)(nil)
 
 // New builds an Engine on a journal.
 func New(j *journal.Files) *Engine {
+	// The stats dir exists from the start so saveGaps never creates
+	// directories late in a turn; a write after the root is gone (tests
+	// tearing down) fails quietly instead of resurrecting the tree.
+	_ = os.MkdirAll(filepath.Join(j.Root, "stats"), 0o755)
 	return &Engine{
 		Journal:  j,
 		seq:      map[waggle.SessionID]uint64{},
@@ -60,6 +68,9 @@ func New(j *journal.Files) *Engine {
 		queue:    map[waggle.SessionID]string{},
 		dirty:    map[waggle.SessionID]bool{},
 		attn:     map[waggle.SessionID]*attention{},
+		last:     map[waggle.SessionID]time.Time{},
+		boost:    map[waggle.SessionID]uint{},
+		gaps:     map[string]*gapStats{},
 	}
 }
 
@@ -69,10 +80,12 @@ func (e *Engine) Sessions(ctx context.Context) ([]hive.SessionInfo, error) {
 	if err != nil {
 		return nil, err
 	}
+	now := time.Now()
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	out := make([]hive.SessionInfo, 0, len(metas))
 	for _, m := range metas {
+		e.checkStall(m.ID, m.Brain, now)
 		st, ok := e.state[m.ID]
 		if !ok {
 			st = hive.StateIdle
@@ -124,9 +137,16 @@ func (e *Engine) Open(ctx context.Context, id waggle.SessionID, dir, brain strin
 
 func (e *Engine) info(m journal.Meta) hive.SessionInfo {
 	e.mu.Lock()
+	e.checkStall(m.ID, m.Brain, time.Now())
 	st, ok := e.state[m.ID]
 	dirty := e.dirty[m.ID]
-	a := e.attn[m.ID]
+	// Copied, not shared: a raised stall's detail keeps growing under
+	// the lock, and this reader has already let go of it.
+	var a *attention
+	if live := e.attn[m.ID]; live != nil {
+		cp := *live
+		a = &cp
+	}
 	e.mu.Unlock()
 	if !ok {
 		st = hive.StateIdle
@@ -161,12 +181,24 @@ func (e *Engine) Send(ctx context.Context, id waggle.SessionID, msg string) erro
 		return fmt.Errorf("engine: unknown session %s: %w", id, err)
 	}
 	e.ensureSeq(id)
+	// The turn is registered with the busy check, in one lock, before the
+	// adapter starts: two racing Sends cannot both pass, and anyone who
+	// can see the turn's effects can also see the turn, so Stop always
+	// finds it and waits out the pump's tail instead of no-opping early.
+	t := &turn{done: make(chan struct{})}
 	e.mu.Lock()
 	if _, busy := e.running[id]; busy {
 		e.mu.Unlock()
 		return fmt.Errorf("engine: session %s already has a turn running", id)
 	}
+	e.running[id] = t
 	e.mu.Unlock()
+	abort := func() {
+		e.mu.Lock()
+		delete(e.running, id)
+		e.mu.Unlock()
+		close(t.done)
+	}
 
 	if m.Title == "" {
 		// Saved now, not at turn end: session lists and collision
@@ -183,6 +215,7 @@ func (e *Engine) Send(ctx context.Context, id waggle.SessionID, msg string) erro
 		e.wtMu.Lock()
 		if om, busy := e.folderCollision(ctx, id, m.Dir); busy {
 			e.wtMu.Unlock()
+			abort()
 			return &hive.FolderBusyError{With: om.Title}
 		}
 		e.setState(id, hive.StateWorking)
@@ -206,6 +239,7 @@ func (e *Engine) Send(ctx context.Context, id waggle.SessionID, msg string) erro
 	// and undo are promises made at the first turn, not at review time.
 	if _, err := e.ensureBaseline(ctx, id); err != nil {
 		e.setState(id, hive.StateDied)
+		abort()
 		return err
 	}
 
@@ -214,6 +248,7 @@ func (e *Engine) Send(ctx context.Context, id waggle.SessionID, msg string) erro
 	drv, err := adapter.Open(m.Brain)
 	if err != nil {
 		e.setState(id, hive.StateDied)
+		abort()
 		return err
 	}
 	// Turns outlive the caller's ctx: the TUI's Send returns immediately
@@ -221,12 +256,17 @@ func (e *Engine) Send(ctx context.Context, id waggle.SessionID, msg string) erro
 	stream, err := drv.Run(context.Background(), adapter.Session{ID: id, Dir: m.Dir, Resume: m.Resume}, msg)
 	if err != nil {
 		e.setState(id, hive.StateDied)
+		abort()
 		return err
 	}
-	t := &turn{stream: stream, done: make(chan struct{})}
 	e.mu.Lock()
-	e.running[id] = t
+	t.stream = stream
+	stopNow := t.stopReq
 	e.mu.Unlock()
+	if stopNow {
+		// Stop landed while the adapter was still starting up; honor it.
+		_ = stream.Stop(context.Background())
+	}
 
 	go e.pump(id, m, t)
 	return nil
@@ -243,6 +283,12 @@ func (e *Engine) pump(id waggle.SessionID, m journal.Meta, t *turn) {
 	var lastSay, diedDetail string
 	for ev := range stream.Events() {
 		ev.Sess = id
+		if e.beat(id, m.Brain) {
+			// The run spoke up after a stall raise and before anyone
+			// acted: silent self-heal, journaled for the stats.
+			e.append(waggle.Event{Sess: id, Bee: "hachi", Kind: waggle.KindMarker, At: time.Now(),
+				Data: waggle.Enc(waggle.Marker{Name: "stall_selfheal"})})
+		}
 		switch ev.Kind {
 		case waggle.KindResult:
 			sawResult = true
@@ -293,9 +339,10 @@ func (e *Engine) pump(id waggle.SessionID, m journal.Meta, t *turn) {
 	m.Updated = time.Now()
 	_ = e.Journal.SaveMeta(m)
 	e.mu.Lock()
-	delete(e.running, id)
+	delete(e.boost, id) // keep-waiting doubles N for one turn only
 	e.state[id] = final
 	e.mu.Unlock()
+	e.saveGaps(m.Brain)
 	// Recompute before the done signal: Stop waits on it, and a client
 	// asking for the session right after Stop must see fresh DiffReady.
 	e.refreshDirty(context.Background(), id)
@@ -304,6 +351,12 @@ func (e *Engine) pump(id waggle.SessionID, m journal.Meta, t *turn) {
 		e.append(waggle.Event{Sess: id, Bee: "hachi", Kind: waggle.KindNeedInput, At: time.Now(),
 			Data: waggle.Enc(waggle.NeedInput{Prompt: question(lastSay), Origin: "engine"})})
 	}
+	// The turn stays registered until here so Stop doubles as a drain
+	// barrier: it returns only once every write above has landed. A Send
+	// arriving during this tail is refused as busy instead of racing it.
+	e.mu.Lock()
+	delete(e.running, id)
+	e.mu.Unlock()
 	close(t.done)
 	// This session leaving Working may be what a queued message in the
 	// same folder was waiting on.
@@ -363,12 +416,19 @@ func (e *Engine) Watch(ctx context.Context, id waggle.SessionID) (<-chan waggle.
 func (e *Engine) Stop(ctx context.Context, id waggle.SessionID) error {
 	e.mu.Lock()
 	t, ok := e.running[id]
-	e.mu.Unlock()
 	if !ok {
+		e.mu.Unlock()
 		return nil
 	}
-	if err := t.stream.Stop(ctx); err != nil {
-		return err
+	// The stream can be nil for the moment between the turn registering
+	// and the adapter starting; the flag makes Send honor the stop then.
+	stream := t.stream
+	t.stopReq = true
+	e.mu.Unlock()
+	if stream != nil {
+		if err := stream.Stop(ctx); err != nil {
+			return err
+		}
 	}
 	select {
 	case <-t.done:
@@ -429,6 +489,9 @@ func (e *Engine) setState(id waggle.SessionID, s hive.State) {
 		// A turn starting is the human acting: answering the question,
 		// retrying the death. Whatever was raised is resolved by it.
 		delete(e.attn, id)
+		// The stall clock starts with the turn, so a brain slow to say
+		// its first word is already on it.
+		e.last[id] = time.Now()
 	}
 	e.mu.Unlock()
 }
