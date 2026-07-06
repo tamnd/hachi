@@ -52,6 +52,18 @@ type SessionInfo struct {
 	// for review; it stays up until the changes are staged, committed,
 	// or undone.
 	DiffReady bool
+
+	// Reason says why the session needs a human, when it does: "question"
+	// for an unanswered ask, "diff" for a finished run whose changes
+	// nobody has looked at, "died" for an unacknowledged death. Empty
+	// when nothing is raised. A raised reason is what moves State to
+	// needs; died sessions keep StateDied and carry the reason alongside.
+	Reason string
+	// Detail is one plain sentence behind Reason: the question itself,
+	// the death's error, what finished. Clients print it, never parse it.
+	Detail string
+	// Raised is when the reason went up, for oldest-first ordering.
+	Raised time.Time
 }
 
 // FileDiff is one file's baseline-to-now change. The engine computes it;
@@ -137,6 +149,12 @@ type Service interface {
 	// explicit path restores even a flagged file, because naming it is
 	// the confirmation.
 	Restore(ctx context.Context, id waggle.SessionID, paths []string) (RestoreReport, error)
+	// Seen records that the human looked at what a session raised for
+	// them: opening the diff of a finished run parks it back in review,
+	// and opening a died session acknowledges the death. A question stays
+	// raised, because a question is cleared by answering, not by looking.
+	// Safe to call when nothing is raised; it does nothing.
+	Seen(ctx context.Context, id waggle.SessionID) error
 	// MergeBack brings a worktree session's branch into the user's own
 	// checkout: fast-forward when possible, a real merge commit
 	// otherwise. It refuses while the checkout has uncommitted changes

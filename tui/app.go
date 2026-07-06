@@ -454,7 +454,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.layout()
 			m.refresh(m.vp.AtBottom())
 		}
-		return m, nil
+		return m, m.autoSeen()
 
 	case stripTickMsg:
 		return m, tea.Batch(m.pollSessions(), stripTick())
@@ -641,6 +641,10 @@ func (m *model) focus(v *sview) tea.Cmd {
 	m.screen = screenChat
 	m.layout()
 	m.refresh(true)
+	if v.sess.State == hive.StateDied {
+		// Coming back to a death is seeing it; the raise has done its job.
+		return tea.Batch(m.ta.Focus(), m.seen(v.sess.ID))
+	}
 	return m.ta.Focus()
 }
 
@@ -1057,6 +1061,11 @@ func (m *model) viewList() string {
 		}
 		if s.State == hive.StateWaiting {
 			detail = "waiting for the folder · " + detail
+		}
+		if s.Detail != "" {
+			// Why it needs you, in its own words: the question, the
+			// error, what finished.
+			detail = truncate(s.Detail, 40) + " · " + detail
 		}
 		row := fmt.Sprintf("%s  %s  %s", stateDot(m.th, s.State), truncate(title, m.w-30),
 			m.th.Faint.Render(detail))

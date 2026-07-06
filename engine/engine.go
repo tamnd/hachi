@@ -31,6 +31,7 @@ type Engine struct {
 	bases    map[waggle.SessionID]*baseline
 	queue    map[waggle.SessionID]string // parked messages waiting for their folder
 	dirty    map[waggle.SessionID]bool   // unaccepted changes on disk; what DiffReady reports
+	attn     map[waggle.SessionID]*attention
 	nonce    uint64
 
 	// wtMu serializes worktree creation so racing sends cannot pick the
@@ -58,6 +59,7 @@ func New(j *journal.Files) *Engine {
 		bases:    map[waggle.SessionID]*baseline{},
 		queue:    map[waggle.SessionID]string{},
 		dirty:    map[waggle.SessionID]bool{},
+		attn:     map[waggle.SessionID]*attention{},
 	}
 }
 
@@ -75,14 +77,29 @@ func (e *Engine) Sessions(ctx context.Context) ([]hive.SessionInfo, error) {
 		if !ok {
 			st = hive.StateIdle
 		}
-		out = append(out, hive.SessionInfo{
+		info := hive.SessionInfo{
 			ID: m.ID, Title: m.Title, Dir: m.Dir, Brain: m.Brain,
 			State: st, Created: m.Created, Updated: m.Updated,
 			InRepo: inRepo(m.Dir), Branch: m.WorktreeBranch,
 			DiffReady: e.dirty[m.ID],
-		})
+		}
+		fillAttention(&info, e.attn[m.ID])
+		out = append(out, info)
 	}
 	return out, nil
+}
+
+// fillAttention folds a raised reason into the info: the reason rides
+// along, and a raised session reads as needing the human. Died keeps its
+// own state, since a death is more specific than needs.
+func fillAttention(info *hive.SessionInfo, a *attention) {
+	if a == nil {
+		return
+	}
+	info.Reason, info.Detail, info.Raised = a.reason, a.detail, a.raised
+	if info.State != hive.StateDied {
+		info.State = hive.StateNeeds
+	}
 }
 
 // Open returns an existing session or creates a new one.
@@ -109,11 +126,14 @@ func (e *Engine) info(m journal.Meta) hive.SessionInfo {
 	e.mu.Lock()
 	st, ok := e.state[m.ID]
 	dirty := e.dirty[m.ID]
+	a := e.attn[m.ID]
 	e.mu.Unlock()
 	if !ok {
 		st = hive.StateIdle
 	}
-	return hive.SessionInfo{ID: m.ID, Title: m.Title, Dir: m.Dir, Brain: m.Brain, State: st, Created: m.Created, Updated: m.Updated, InRepo: inRepo(m.Dir), Branch: m.WorktreeBranch, DiffReady: dirty}
+	info := hive.SessionInfo{ID: m.ID, Title: m.Title, Dir: m.Dir, Brain: m.Brain, State: st, Created: m.Created, Updated: m.Updated, InRepo: inRepo(m.Dir), Branch: m.WorktreeBranch, DiffReady: dirty}
+	fillAttention(&info, a)
+	return info
 }
 
 // inRepo walks up from dir looking for a .git entry, directory or file,
@@ -216,9 +236,21 @@ func (e *Engine) Send(ctx context.Context, id waggle.SessionID, msg string) erro
 func (e *Engine) pump(id waggle.SessionID, m journal.Meta, t *turn) {
 	stream := t.stream
 	final := hive.StateIdle
+	// The turn's evidence for attention: a result event means a clean
+	// finish (an interrupted stream never sends one), the brain's last
+	// message may be a question, and a death carries its own detail.
+	var sawResult bool
+	var lastSay, diedDetail string
 	for ev := range stream.Events() {
 		ev.Sess = id
 		switch ev.Kind {
+		case waggle.KindResult:
+			sawResult = true
+		case waggle.KindMessage:
+			var msg waggle.Message
+			if err := decode(ev.Data, &msg); err == nil && ev.Bee != "human" {
+				lastSay = msg.Text
+			}
 		case waggle.KindSpawned:
 			var sp waggle.Spawned
 			if err := decode(ev.Data, &sp); err == nil && sp.Resume != "" && sp.Resume != m.Resume {
@@ -241,7 +273,19 @@ func (e *Engine) pump(id waggle.SessionID, m journal.Meta, t *turn) {
 			}
 		case waggle.KindDied:
 			final = hive.StateDied
+			var d waggle.Died
+			if err := decode(ev.Data, &d); err == nil {
+				diedDetail = d.Error
+			}
 		case waggle.KindNeedInput:
+			// A mid-turn ask from the adapter itself; codex never sends
+			// one, but the state machine is ready for brains that do.
+			var ni waggle.NeedInput
+			if err := decode(ev.Data, &ni); err == nil {
+				e.mu.Lock()
+				e.attn[id] = &attention{reason: "question", detail: ni.Prompt, raised: time.Now()}
+				e.mu.Unlock()
+			}
 			e.setState(id, hive.StateNeeds)
 		}
 		e.append(ev)
@@ -255,6 +299,11 @@ func (e *Engine) pump(id waggle.SessionID, m journal.Meta, t *turn) {
 	// Recompute before the done signal: Stop waits on it, and a client
 	// asking for the session right after Stop must see fresh DiffReady.
 	e.refreshDirty(context.Background(), id)
+	if e.settle(id, final, sawResult, lastSay, diedDetail) == "question" {
+		// The ask goes in the journal too, so a replay can re-raise it.
+		e.append(waggle.Event{Sess: id, Bee: "hachi", Kind: waggle.KindNeedInput, At: time.Now(),
+			Data: waggle.Enc(waggle.NeedInput{Prompt: question(lastSay), Origin: "engine"})})
+	}
 	close(t.done)
 	// This session leaving Working may be what a queued message in the
 	// same folder was waiting on.
@@ -376,6 +425,11 @@ func (e *Engine) append(ev waggle.Event) {
 func (e *Engine) setState(id waggle.SessionID, s hive.State) {
 	e.mu.Lock()
 	e.state[id] = s
+	if s == hive.StateWorking {
+		// A turn starting is the human acting: answering the question,
+		// retrying the death. Whatever was raised is resolved by it.
+		delete(e.attn, id)
+	}
 	e.mu.Unlock()
 }
 
@@ -390,6 +444,10 @@ func (e *Engine) refreshDirty(ctx context.Context, id waggle.SessionID) {
 		e.dirty[id] = true
 	} else {
 		delete(e.dirty, id)
+		if a := e.attn[id]; a != nil && a.reason == "diff" {
+			// Nothing left to review; the raise resolved itself.
+			delete(e.attn, id)
+		}
 	}
 	e.mu.Unlock()
 }

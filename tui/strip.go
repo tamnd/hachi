@@ -19,6 +19,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/tamnd/hachi/hive"
+	"github.com/tamnd/hachi/waggle"
 )
 
 type stripTickMsg struct{}
@@ -53,6 +54,11 @@ type stripCounts struct {
 func (m *model) stripCounts() stripCounts {
 	var c stripCounts
 	for _, s := range m.sessions {
+		if s.ID == m.sess.ID {
+			// The session on screen speaks for itself; the strip only
+			// counts what is happening elsewhere.
+			continue
+		}
 		switch {
 		case s.State == hive.StateNeeds || s.State == hive.StateDied:
 			c.needs++
@@ -95,19 +101,101 @@ func (m *model) stripRows() int {
 	return 0
 }
 
+// topNeed picks the raised reason worth naming on a wide strip: the
+// highest-priority reason among sessions elsewhere, oldest raise first
+// within a rank. Questions outrank deaths outrank waiting diffs.
+func (m *model) topNeed() (title, detail string) {
+	rank := func(r string) int {
+		switch r {
+		case "question":
+			return 0
+		case "died":
+			return 1
+		case "diff":
+			return 2
+		}
+		return 3
+	}
+	best := -1
+	for i, s := range m.sessions {
+		if s.ID == m.sess.ID || (s.State != hive.StateNeeds && s.State != hive.StateDied) {
+			continue
+		}
+		if best == -1 || rank(s.Reason) < rank(m.sessions[best].Reason) ||
+			(rank(s.Reason) == rank(m.sessions[best].Reason) && s.Raised.Before(m.sessions[best].Raised)) {
+			best = i
+		}
+	}
+	if best == -1 {
+		return "", ""
+	}
+	s := m.sessions[best]
+	title = s.Title
+	if title == "" {
+		title = "a session"
+	}
+	detail = s.Detail
+	if detail == "" {
+		switch s.Reason {
+		case "died":
+			detail = "the run died"
+		case "diff":
+			detail = "changes to review"
+		default:
+			detail = "waiting on you"
+		}
+	}
+	return title, detail
+}
+
+// seen tells the engine the human has looked: opening a diff parks its
+// raise back in review, focusing a died session acknowledges the death.
+// Fire and forget; the next poll reflects it.
+func (m *model) seen(id waggle.SessionID) tea.Cmd {
+	if id == "" {
+		return nil
+	}
+	return func() tea.Msg {
+		_ = m.svc.Seen(context.Background(), id)
+		return nil
+	}
+}
+
+// autoSeen acknowledges what the human is already looking at: a died
+// session they are inside, or a fresh diff whose screen is open. It runs
+// off the 2s poll, so a turn that ends while its diff is on screen
+// clears itself within a beat instead of nagging.
+func (m *model) autoSeen() tea.Cmd {
+	for _, s := range m.sessions {
+		if s.ID != m.sess.ID || s.ID == "" {
+			continue
+		}
+		if s.State == hive.StateDied ||
+			(s.Reason == "diff" && (m.screen == screenDiff || m.screen == screenReview)) {
+			return m.seen(s.ID)
+		}
+	}
+	return nil
+}
+
 // viewStrip renders the row. Segments sit in priority order and drop
-// from the right when the terminal is narrow, so need-you goes last;
-// the key hints only fit on wide terminals and drop first.
+// from the right when the terminal is narrow, so need-you goes last; the
+// key hints only fit on wide terminals and drop first, then the named
+// reason, then the counts.
 func (m *model) viewStrip() string {
 	c := m.stripCounts()
 	sep := m.th.Faint.Render(" · ")
 	var segs []string
+	var reason string
 	if c.needs > 0 {
 		word := "need you"
 		if c.needs == 1 {
 			word = "needs you"
 		}
 		segs = append(segs, m.th.ToolBad.Render(fmt.Sprintf("● %d %s", c.needs, word)))
+		if title, detail := m.topNeed(); title != "" && m.w >= 120 {
+			reason = m.th.Faint.Render(" (" + truncate(title, 24) + ": " + truncate(detail, m.w/3) + ")")
+		}
 	}
 	if c.working > 0 {
 		segs = append(segs, m.th.Faint.Render(fmt.Sprintf("▸ %d working", c.working)))
@@ -130,20 +218,27 @@ func (m *model) viewStrip() string {
 	hints := m.th.Faint.Render("│ ") +
 		m.th.StatusKey.Render("ctrl+l") + m.th.Faint.Render(" sessions") + sep +
 		m.th.StatusKey.Render("ctrl+n") + m.th.Faint.Render(" new")
-	build := func(n int, withHints bool) string {
-		line := " " + strings.Join(segs[:n], sep)
+	build := func(n int, withHints, withReason bool) string {
+		parts := append([]string{}, segs[:n]...)
+		if withReason && reason != "" {
+			parts[0] += reason
+		}
+		line := " " + strings.Join(parts, sep)
 		if withHints {
 			line += "  " + hints
 		}
 		return line
 	}
-	line := build(len(segs), m.w >= 120)
+	line := build(len(segs), m.w >= 120, true)
 	if lipgloss.Width(line) > m.w {
-		line = build(len(segs), false)
+		line = build(len(segs), false, true)
+	}
+	if lipgloss.Width(line) > m.w {
+		line = build(len(segs), false, false)
 	}
 	for n := len(segs); lipgloss.Width(line) > m.w && n > 1; {
 		n--
-		line = build(n, false)
+		line = build(n, false, false)
 	}
 	return line
 }

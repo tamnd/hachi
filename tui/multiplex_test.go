@@ -53,6 +53,7 @@ func (f *muxSvc) Restore(context.Context, waggle.SessionID, []string) (hive.Rest
 	return hive.RestoreReport{}, nil
 }
 func (f *muxSvc) Queue(context.Context, waggle.SessionID, string) error { return nil }
+func (f *muxSvc) Seen(context.Context, waggle.SessionID) error          { return nil }
 func (f *muxSvc) MergeBack(context.Context, waggle.SessionID) (hive.MergeReport, error) {
 	return hive.MergeReport{}, nil
 }

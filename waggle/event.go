@@ -40,6 +40,9 @@ const (
 	KindResult Kind = "result"
 	// KindDied marks a run ending abnormally.
 	KindDied Kind = "died"
+	// KindMarker is hachi's own bookkeeping in the journal: attention
+	// state changes that have to survive a restart, never brain output.
+	KindMarker Kind = "marker"
 	// KindRaw wraps upstream output no mapping exists for yet.
 	KindRaw Kind = "raw"
 )
@@ -143,6 +146,25 @@ type Cost struct {
 	OutputTokens      int64 `json:"output_tokens"`
 	ReasoningTokens   int64 `json:"reasoning_tokens"`
 	Live              bool  `json:"live,omitempty"`
+}
+
+// NeedInput is the payload for KindNeedInput. Origin says who is
+// asking: "brain" when the agent itself blocked on a prompt, "guard"
+// when a permission gate is holding a tool call, "engine" when hachi
+// inferred the ask, like a final message that ends in a question mark.
+// Codex runs headless and never blocks on stdin, so codex sessions only
+// ever see engine-origin asks.
+type NeedInput struct {
+	Prompt  string   `json:"prompt"`
+	Choices []string `json:"choices,omitempty"`
+	Origin  string   `json:"origin"`
+}
+
+// Marker is the payload for KindMarker. Names in use: "seen" when the
+// human opened what a session was holding up for them, "stall_selfheal"
+// when a stall alarm cleared itself before anyone answered it.
+type Marker struct {
+	Name string `json:"name"`
 }
 
 // Died is the payload for KindDied.

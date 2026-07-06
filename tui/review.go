@@ -55,8 +55,9 @@ func (m *model) openReview() (tea.Model, tea.Cmd) {
 	m.renderReview()
 	// The diff is always a fresh set, and the session info rides along:
 	// the first turn may have moved this session into a worktree, and
-	// the header needs the branch the open-time copy never saw.
-	return m, tea.Batch(m.loadDiff(), m.refreshInfo())
+	// the header needs the branch the open-time copy never saw. Opening
+	// review is seeing the raise, same as opening the diff.
+	return m, tea.Batch(m.loadDiff(), m.refreshInfo(), m.seen(m.sess.ID))
 }
 
 // reviewCmds — each verb is one Service call in a tea.Cmd.
