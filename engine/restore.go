@@ -3,8 +3,9 @@ package engine
 // Restore means: this path becomes byte-identical to its state at
 // baseline. Tracked bytes come from the baseline commit, untracked and
 // non-git bytes from the blob store, and files the session created are
-// deleted. Files the human changed after the agent are never silently
-// overwritten; blanket restore skips them and says so.
+// deleted. A blanket restore never silently overwrites files the human
+// changed after the agent, and never un-keeps what the human accepted;
+// naming a path explicitly is the confirmation that overrides both.
 
 import (
 	"bytes"
@@ -15,38 +16,78 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
+	"github.com/tamnd/hachi/hive"
 	"github.com/tamnd/hachi/waggle"
 )
 
-// RestoreSkip is one path a restore left alone, with the reason in plain
-// words, ready for the completion line.
-type RestoreSkip struct {
-	Path   string
-	Reason string
-}
-
-// RestoreReport says what a restore actually did.
-type RestoreReport struct {
-	Restored []string
-	Skipped  []RestoreSkip
-}
+// RestoreSkip and RestoreReport are the hive types; the engine keeps the
+// names so callers inside the module read naturally.
+type (
+	RestoreSkip   = hive.RestoreSkip
+	RestoreReport = hive.RestoreReport
+)
 
 // RestoreAll puts every session-changed path back to its baseline state.
-// Paths flagged as changed outside the session are skipped, not asked
-// about; single-file prompts are the review screen's job.
 func (e *Engine) RestoreAll(ctx context.Context, id waggle.SessionID) (RestoreReport, error) {
+	return e.Restore(ctx, id, nil)
+}
+
+// Restore implements hive.Service. Nil paths means the whole change set
+// with the protective skips; explicit paths restore exactly those, even
+// flagged or kept ones, because the caller named them on a screen.
+func (e *Engine) Restore(ctx context.Context, id waggle.SessionID, paths []string) (RestoreReport, error) {
 	b, err := e.ensureBaseline(ctx, id)
 	if err != nil {
 		return RestoreReport{}, err
 	}
-	if b.meta.Root != "" {
-		return e.restoreGit(ctx, b)
+	var only map[string]bool
+	force := false
+	if len(paths) > 0 {
+		only = map[string]bool{}
+		for _, p := range paths {
+			only[p] = true
+		}
+		force = true
 	}
-	return e.restoreNonGit(b)
+	var rep RestoreReport
+	if b.meta.Root != "" {
+		rep, err = e.restoreGit(ctx, b, only, force)
+	} else {
+		rep, err = e.restoreNonGit(b, only, force)
+	}
+	if err == nil && len(rep.Restored) > 0 {
+		// Replay must show the undo happened; the tree alone cannot,
+		// that being the whole point of a byte-identical restore.
+		e.ensureSeq(id)
+		e.append(waggle.Event{Sess: id, Bee: "hachi", Kind: waggle.KindFinding, At: time.Now(),
+			Data: waggle.Enc(waggle.Message{Text: restoreMarker(rep)})})
+	}
+	return rep, err
 }
 
-func (e *Engine) restoreGit(ctx context.Context, b *baseline) (RestoreReport, error) {
+func restoreMarker(rep RestoreReport) string {
+	files := "files"
+	if len(rep.Restored) == 1 {
+		files = "file"
+	}
+	s := fmt.Sprintf("undo: put %d %s back to their pre-session state", len(rep.Restored), files)
+	if len(rep.Restored) == 1 {
+		s = "undo: put " + rep.Restored[0] + " back to its pre-session state"
+	}
+	if n := len(rep.Skipped); n > 0 {
+		s += fmt.Sprintf(", left %d alone", n)
+	}
+	return s
+}
+
+// wanted gates a path against an explicit restore list.
+func wanted(only map[string]bool, rel string) bool {
+	return only == nil || only[rel]
+}
+
+func (e *Engine) restoreGit(ctx context.Context, b *baseline, only map[string]bool, force bool) (RestoreReport, error) {
 	var rep RestoreReport
 	root := b.meta.Root
 	oid := b.meta.BaselineOID
@@ -58,10 +99,6 @@ func (e *Engine) restoreGit(ctx context.Context, b *baseline) (RestoreReport, er
 	untrackedNow, err := gitPaths(ctx, root, "ls-files", "--others", "--exclude-standard", "-z")
 	if err != nil {
 		return rep, err
-	}
-	nowSet := map[string]bool{}
-	for _, p := range untrackedNow {
-		nowSet[p] = true
 	}
 
 	// Work out every target first so case collisions (one file on a Mac,
@@ -77,13 +114,21 @@ func (e *Engine) restoreGit(ctx context.Context, b *baseline) (RestoreReport, er
 	for _, ch := range changed {
 		st, rel := ch[0], ch[1]
 		handled[rel] = true
-		if en := b.byPath[rel]; b.outsideEdited(en) {
+		if !wanted(only, rel) {
+			continue
+		}
+		if en := b.byPath[rel]; !force && b.outsideEdited(en) {
 			rep.Skipped = append(rep.Skipped, RestoreSkip{Path: rel, Reason: "you changed it yourself"})
 			continue
 		}
 		switch st {
 		case "M", "D", "T":
-			acts = append(acts, action{rel, func() error { return restoreTracked(ctx, root, oid, rel) }})
+			acts = append(acts, action{rel, func() error {
+				if err := e.unstageIfStaged(ctx, b, rel); err != nil {
+					return err
+				}
+				return restoreTracked(ctx, root, oid, rel)
+			}})
 		case "A":
 			// Tracked now, absent from the baseline tree: the session
 			// git-added it. An unborn repo's own staged files live in
@@ -97,6 +142,7 @@ func (e *Engine) restoreGit(ctx context.Context, b *baseline) (RestoreReport, er
 					if _, err := gitOut(ctx, root, "rm", "--cached", "-q", "--ignore-unmatch", "--", rel); err != nil {
 						return err
 					}
+					b.clearStaged(rel)
 					return b.restoreBlobEntry(en)
 				}})
 			default:
@@ -104,6 +150,7 @@ func (e *Engine) restoreGit(ctx context.Context, b *baseline) (RestoreReport, er
 					if _, err := gitOut(ctx, root, "rm", "--cached", "-q", "--ignore-unmatch", "--", rel); err != nil {
 						return err
 					}
+					b.clearStaged(rel)
 					return removeIgnoreMissing(filepath.Join(root, filepath.FromSlash(rel)))
 				}})
 			}
@@ -112,7 +159,7 @@ func (e *Engine) restoreGit(ctx context.Context, b *baseline) (RestoreReport, er
 
 	// Untracked at baseline: restore what drifted from the manifest.
 	for _, en := range b.entries {
-		if en.Class != "untracked" || handled[en.Path] {
+		if en.Class != "untracked" || handled[en.Path] || !wanted(only, en.Path) {
 			continue
 		}
 		drifted, err := b.entryDrifted(en)
@@ -120,7 +167,7 @@ func (e *Engine) restoreGit(ctx context.Context, b *baseline) (RestoreReport, er
 			continue
 		}
 		handled[en.Path] = true
-		if b.outsideEdited(en) {
+		if !force && b.outsideEdited(en) {
 			rep.Skipped = append(rep.Skipped, RestoreSkip{Path: en.Path, Reason: "you changed it yourself"})
 			continue
 		}
@@ -134,18 +181,19 @@ func (e *Engine) restoreGit(ctx context.Context, b *baseline) (RestoreReport, er
 
 	// Untracked now but not at baseline: the session created it.
 	for _, rel := range untrackedNow {
-		if handled[rel] {
+		if handled[rel] || !wanted(only, rel) {
 			continue
 		}
 		if en, ok := b.byPath[rel]; ok && en.Class == "untracked" {
 			continue // unchanged baseline scratch file, not ours to touch
 		}
-		if en := b.byPath[rel]; b.outsideEdited(en) {
+		if en := b.byPath[rel]; !force && b.outsideEdited(en) {
 			rep.Skipped = append(rep.Skipped, RestoreSkip{Path: rel, Reason: "you changed it yourself"})
 			continue
 		}
 		rel := rel
 		acts = append(acts, action{rel, func() error {
+			b.clearStaged(rel)
 			return removeIgnoreMissing(filepath.Join(root, filepath.FromSlash(rel)))
 		}})
 	}
@@ -164,7 +212,38 @@ func (e *Engine) restoreGit(ctx context.Context, b *baseline) (RestoreReport, er
 		}
 		rep.Restored = append(rep.Restored, a.path)
 	}
+	_ = b.saveManifest()
 	return rep, nil
+}
+
+// unstageIfStaged puts the index entry for a path hachi staged back to
+// its baseline state, so the index never holds content the tree no
+// longer has. Paths the user staged themselves are never touched.
+func (e *Engine) unstageIfStaged(ctx context.Context, b *baseline, rel string) error {
+	en := b.byPath[rel]
+	if en == nil || !en.Staged {
+		return nil
+	}
+	// The stash commit's second parent is the index as it stood at
+	// baseline; a clean baseline's index matched HEAD.
+	src := b.meta.BaselineOID
+	if !b.meta.CleanAtBaseline && !b.meta.UnbornAtBaseline {
+		src += "^2"
+	}
+	if _, err := gitOut(ctx, b.meta.Root, "restore", "--staged", "--source="+src, "--", rel); err != nil {
+		// The path did not exist in the baseline index at all.
+		if _, err := gitOut(ctx, b.meta.Root, "rm", "--cached", "-q", "--ignore-unmatch", "--", rel); err != nil {
+			return err
+		}
+	}
+	en.Staged = false
+	return nil
+}
+
+func (b *baseline) clearStaged(rel string) {
+	if en := b.byPath[rel]; en != nil {
+		en.Staged = false
+	}
 }
 
 // entryDrifted reports whether an untracked-at-baseline file no longer
@@ -276,7 +355,7 @@ func restoreTracked(ctx context.Context, root, oid, rel string) error {
 	return os.Chmod(abs, perm)
 }
 
-func (e *Engine) restoreNonGit(b *baseline) (RestoreReport, error) {
+func (e *Engine) restoreNonGit(b *baseline, only map[string]bool, force bool) (RestoreReport, error) {
 	var rep RestoreReport
 	var failed []*ManifestEntry
 
@@ -286,17 +365,24 @@ func (e *Engine) restoreNonGit(b *baseline) (RestoreReport, error) {
 	// last. One retry pass covers the file-replaced-by-directory case,
 	// where a created dir blocks an original until deletions run.
 	for _, en := range b.entries {
-		if en.Class != "original" {
+		if en.Class != "original" || !wanted(only, en.Path) {
 			continue
 		}
-		if b.outsideEdited(en) {
-			rep.Skipped = append(rep.Skipped, RestoreSkip{Path: en.Path, Reason: "you changed it yourself"})
-			continue
+		if !force {
+			if b.outsideEdited(en) {
+				rep.Skipped = append(rep.Skipped, RestoreSkip{Path: en.Path, Reason: "you changed it yourself"})
+				continue
+			}
+			if en.Staged {
+				rep.Skipped = append(rep.Skipped, RestoreSkip{Path: en.Path, Reason: "you kept it"})
+				continue
+			}
 		}
 		if !en.Snapshotted {
 			rep.Skipped = append(rep.Skipped, RestoreSkip{Path: en.Path, Reason: "too big to have saved a copy"})
 			continue
 		}
+		en.Staged = false
 		if err := restoreOriginal(en); err != nil {
 			failed = append(failed, en)
 			continue
@@ -305,13 +391,20 @@ func (e *Engine) restoreNonGit(b *baseline) (RestoreReport, error) {
 	}
 	var createdDirs []string
 	for _, en := range b.entries {
-		if en.Class != "created" {
+		if en.Class != "created" || !wanted(only, en.Path) {
 			continue
 		}
-		if b.outsideEdited(en) {
-			rep.Skipped = append(rep.Skipped, RestoreSkip{Path: en.Path, Reason: "you changed it yourself"})
-			continue
+		if !force {
+			if b.outsideEdited(en) {
+				rep.Skipped = append(rep.Skipped, RestoreSkip{Path: en.Path, Reason: "you changed it yourself"})
+				continue
+			}
+			if en.Staged {
+				rep.Skipped = append(rep.Skipped, RestoreSkip{Path: en.Path, Reason: "you kept it"})
+				continue
+			}
 		}
+		en.Staged = false
 		abs := filepath.Join(b.root(), filepath.FromSlash(en.Path))
 		if err := removeIgnoreMissing(abs); err != nil {
 			return rep, fmt.Errorf("engine: removing %s: %w", en.Path, err)
@@ -328,6 +421,7 @@ func (e *Engine) restoreNonGit(b *baseline) (RestoreReport, error) {
 	for _, dir := range createdDirs {
 		pruneEmptyDirs(dir, b.root())
 	}
+	_ = b.saveManifest()
 	return rep, nil
 }
 

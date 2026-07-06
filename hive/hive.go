@@ -40,9 +40,22 @@ type FileDiff struct {
 	Path    string // relative to the session's root, slash-separated
 	Status  string // M modified, A added, D deleted
 	Outside bool   // the human changed it after the agent's last touch
+	Staged  bool   // accepted through hachi: git-staged, or kept in non-git mode
 	Binary  bool
 	Patch   string // unified hunks; empty when Binary or when Note explains why
 	Note    string // plain sentence shown instead of a patch
+}
+
+// RestoreSkip is one path a restore left alone, reason in plain words.
+type RestoreSkip struct {
+	Path   string
+	Reason string
+}
+
+// RestoreReport says what a restore actually did.
+type RestoreReport struct {
+	Restored []string
+	Skipped  []RestoreSkip
 }
 
 // Service is the whole API between hachi's engine and any client.
@@ -63,4 +76,23 @@ type Service interface {
 	// baseline, right now. Safe mid-run; every call recomputes, nothing
 	// is cached, so the result matches the tree at the moment of asking.
 	Changes(ctx context.Context, id waggle.SessionID) ([]FileDiff, error)
+	// Stage accepts changes: git add in a repo, a kept mark outside one.
+	// Nil paths means the whole change set except files flagged as
+	// changed outside the session; those need an explicit path. Returns
+	// what was actually staged.
+	Stage(ctx context.Context, id waggle.SessionID, paths []string) ([]string, error)
+	// CommitDraft fills a commit message template from the session's own
+	// events. Deterministic, never a model call, and it exists to be
+	// edited before Commit.
+	CommitDraft(ctx context.Context, id waggle.SessionID) (string, error)
+	// Commit runs git commit with the message exactly as the human left
+	// it, scoped to the paths staged through Stage; anything the user
+	// staged themselves stays staged and uncommitted. The returned
+	// string is git's own output, hooks included.
+	Commit(ctx context.Context, id waggle.SessionID, message string) (string, error)
+	// Restore puts paths back to their baseline bytes. Nil paths means
+	// everything, skipping files changed outside the session; an
+	// explicit path restores even a flagged file, because naming it is
+	// the confirmation.
+	Restore(ctx context.Context, id waggle.SessionID, paths []string) (RestoreReport, error)
 }
