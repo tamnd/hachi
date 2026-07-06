@@ -21,9 +21,7 @@ import (
 func (m *model) keySentence(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c":
-		if m.cancel != nil {
-			m.cancel()
-		}
+		m.quitAll()
 		return m, tea.Quit
 	case "q", "esc":
 		m.screen = screenChat

@@ -42,16 +42,11 @@ const (
 	screenReview
 )
 
-type model struct {
-	svc  hive.Service
-	opts Options
-	th   theme
-	md   *mdCache
-
-	w, h   int
-	screen screen
-
-	// chat
+// sview is one open session's client-side state: transcript, composer,
+// scroll position, turn status. Every session opened this run keeps one,
+// watch alive, so switching away costs nothing and switching back needs
+// no replay.
+type sview struct {
 	sess     hive.SessionInfo
 	draft    bool // no session created yet; first send creates one
 	items    []*item
@@ -59,7 +54,6 @@ type model struct {
 	lastSeq  uint64
 	vp       viewport.Model
 	ta       textarea.Model
-	spin     spinner.Model
 	working  bool
 	steering bool // turn stopped by esc, next send resumes
 	started  time.Time
@@ -70,6 +64,22 @@ type model struct {
 	errText  string
 	watch    <-chan waggle.Event
 	cancel   context.CancelFunc
+}
+
+type model struct {
+	svc  hive.Service
+	opts Options
+	th   theme
+	md   *mdCache
+
+	w, h   int
+	screen screen
+
+	*sview                              // the focused session; never nil
+	open    map[waggle.SessionID]*sview // every open session, focused included
+	scratch *sview                      // the one draft view, reused by ctrl+n
+	spin    spinner.Model
+	ticking bool // a 1s tick loop is running for some working session
 
 	// list
 	sessions []hive.SessionInfo
@@ -104,7 +114,7 @@ type model struct {
 	keptOnce  bool     // the narrows-undo sentence already ran this session
 }
 
-func newModel(svc hive.Service, opts Options) *model {
+func newSview() *sview {
 	ta := textarea.New()
 	ta.Placeholder = "what should we build?"
 	ta.Prompt = ""
@@ -116,6 +126,10 @@ func newModel(svc hive.Service, opts Options) *model {
 	ta.SetVirtualCursor(true)
 	ta.KeyMap.InsertNewline.SetEnabled(false)
 
+	return &sview{draft: true, byRef: map[string]int{}, ta: ta, vp: viewport.New()}
+}
+
+func newModel(svc hive.Service, opts Options) *model {
 	sp := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 
 	rta := textarea.New()
@@ -127,12 +141,14 @@ func newModel(svc hive.Service, opts Options) *model {
 	m := &model{
 		svc: svc, opts: opts,
 		th: newTheme(true), md: newMDCache(true),
-		screen: screenChat, draft: true,
-		byRef:  map[string]int{},
+		screen: screenChat,
+		open:   map[waggle.SessionID]*sview{},
 		rvGone: map[string]bool{},
-		ta:     ta, spin: sp, vp: viewport.New(), dvp: viewport.New(), rvVP: viewport.New(),
+		spin:   sp, dvp: viewport.New(), rvVP: viewport.New(),
 		rvTA: rta,
 	}
+	m.scratch = newSview()
+	m.sview = m.scratch
 	m.dvp.FillHeight = true
 	m.rvVP.FillHeight = true
 	m.applyTheme()
@@ -145,9 +161,15 @@ func (m *model) applyTheme() {
 
 // --- messages ---
 
-type eventMsg struct{ ev waggle.Event }
-type watchDoneMsg struct{}
-type errMsg struct{ err error }
+type eventMsg struct {
+	id waggle.SessionID
+	ev waggle.Event
+}
+type watchDoneMsg struct{ id waggle.SessionID }
+type errMsg struct {
+	id  waggle.SessionID // empty means the focused session owns it
+	err error
+}
 type sessionsMsg struct{ list []hive.SessionInfo }
 type openedMsg struct {
 	info  hive.SessionInfo
@@ -155,21 +177,21 @@ type openedMsg struct {
 	stop  context.CancelFunc
 	send  string // message to send once the session is applied (draft flow)
 }
-type sentMsg struct{}
-type stoppedMsg struct{}
+type sentMsg struct{ id waggle.SessionID }
+type stoppedMsg struct{ id waggle.SessionID }
 type tickMsg time.Time
 
 func (m *model) Init() tea.Cmd {
 	return tea.Batch(m.spin.Tick, m.ta.Focus(), tea.RequestBackgroundColor)
 }
 
-func waitEvent(ch <-chan waggle.Event) tea.Cmd {
+func waitEvent(id waggle.SessionID, ch <-chan waggle.Event) tea.Cmd {
 	return func() tea.Msg {
 		ev, ok := <-ch
 		if !ok {
-			return watchDoneMsg{}
+			return watchDoneMsg{id: id}
 		}
-		return eventMsg{ev: ev}
+		return eventMsg{id: id, ev: ev}
 	}
 }
 
@@ -181,7 +203,7 @@ func (m *model) loadSessions() tea.Cmd {
 	return func() tea.Msg {
 		list, err := m.svc.Sessions(context.Background())
 		if err != nil {
-			return errMsg{err}
+			return errMsg{err: err}
 		}
 		return sessionsMsg{list}
 	}
@@ -195,13 +217,13 @@ func (m *model) openSession(id waggle.SessionID, send string) tea.Cmd {
 	return func() tea.Msg {
 		info, err := m.svc.Open(context.Background(), id, dir, brain)
 		if err != nil {
-			return errMsg{err}
+			return errMsg{err: err}
 		}
 		ctx, stop := context.WithCancel(context.Background())
 		ch, err := m.svc.Watch(ctx, info.ID)
 		if err != nil {
 			stop()
-			return errMsg{err}
+			return errMsg{err: err}
 		}
 		return openedMsg{info: info, watch: ch, stop: stop, send: send}
 	}
@@ -211,9 +233,9 @@ func (m *model) send(text string) tea.Cmd {
 	id := m.sess.ID
 	return func() tea.Msg {
 		if err := m.svc.Send(context.Background(), id, text); err != nil {
-			return errMsg{err}
+			return errMsg{id: id, err: err}
 		}
-		return sentMsg{}
+		return sentMsg{id: id}
 	}
 }
 
@@ -223,9 +245,9 @@ func (m *model) stopTurn() tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		if err := m.svc.Stop(ctx, id); err != nil {
-			return errMsg{err}
+			return errMsg{id: id, err: err}
 		}
-		return stoppedMsg{}
+		return stoppedMsg{id: id}
 	}
 }
 
@@ -253,39 +275,69 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.key(msg)
 
 	case openedMsg:
-		if m.cancel != nil {
-			m.cancel()
+		if v, ok := m.open[msg.info.ID]; ok {
+			// Already open (a double enter); the duplicate watch goes.
+			msg.stop()
+			cmd := m.focus(v)
+			if msg.send != "" {
+				return m, tea.Batch(cmd, m.send(msg.send))
+			}
+			return m, cmd
 		}
-		m.sess, m.watch, m.cancel = msg.info, msg.watch, msg.stop
-		m.draft = false
-		m.resetTranscript()
-		m.screen = screenChat
-		m.refresh(true)
+		v := newSview()
+		if m.draft {
+			// A draft turning real keeps its composer; the scratch view
+			// is spent and ctrl+n builds the next one fresh.
+			v.ta = m.ta
+			if m.sview == m.scratch {
+				m.scratch = nil
+			}
+		}
+		v.sess, v.watch, v.cancel = msg.info, msg.watch, msg.stop
+		v.draft = false
+		m.open[msg.info.ID] = v
+		cmd := m.focus(v)
 		if msg.send != "" {
-			return m, tea.Batch(waitEvent(m.watch), m.send(msg.send))
+			return m, tea.Batch(cmd, waitEvent(v.sess.ID, v.watch), m.send(msg.send))
 		}
-		return m, waitEvent(m.watch)
+		return m, tea.Batch(cmd, waitEvent(v.sess.ID, v.watch))
 
 	case eventMsg:
-		m.apply(msg.ev)
-		return m, waitEvent(m.watch)
+		v := m.viewOf(msg.id)
+		if v == nil {
+			return m, nil
+		}
+		m.apply(v, msg.ev)
+		return m, waitEvent(msg.id, v.watch)
 
 	case watchDoneMsg:
 		return m, nil
 
 	case sentMsg:
-		m.working = true
-		m.steering = false
-		m.started = time.Now()
-		m.verb = pickVerb(m.started)
-		m.pulse.Usage = waggle.Cost{}
-		m.errText = ""
+		v := m.viewOf(msg.id)
+		if v == nil {
+			return m, nil
+		}
+		v.working = true
+		v.steering = false
+		v.started = time.Now()
+		v.verb = pickVerb(v.started)
+		v.pulse.Usage = waggle.Cost{}
+		v.errText = ""
+		if m.ticking {
+			return m, nil
+		}
+		m.ticking = true
 		return m, tick()
 
 	case stoppedMsg:
-		m.working = false
-		m.steering = true
-		m.finishRunningCards()
+		v := m.viewOf(msg.id)
+		if v == nil {
+			return m, nil
+		}
+		v.working = false
+		v.steering = true
+		v.finishRunningCards()
 		return m, nil
 
 	case diffMsg:
@@ -318,14 +370,19 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case errMsg:
-		m.errText = msg.err.Error()
-		m.working = false
+		v := m.viewOf(msg.id)
+		if v == nil {
+			v = m.sview
+		}
+		v.errText = msg.err.Error()
+		v.working = false
 		return m, nil
 
 	case tickMsg:
-		if m.working {
+		if m.anyWorking() {
 			return m, tick()
 		}
+		m.ticking = false
 		return m, nil
 
 	case spinner.TickMsg:
@@ -355,16 +412,13 @@ func (m *model) key(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	switch msg.String() {
 	case "ctrl+c":
-		if m.cancel != nil {
-			m.cancel()
-		}
+		m.quitAll()
 		return m, tea.Quit
 	case "ctrl+l":
 		m.screen = screenList
 		return m, m.loadSessions()
 	case "ctrl+n":
-		m.startDraft()
-		return m, nil
+		return m, m.startDraft()
 	case "ctrl+o":
 		m.expanded = !m.expanded
 		m.unfreezeClipped()
@@ -437,38 +491,76 @@ func (m *model) keyList(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "n":
-		m.startDraft()
-		return m, nil
+		return m, m.startDraft()
 	case "enter":
-		if len(m.sessions) > 0 {
-			return m, m.openSession(m.sessions[m.cursor].ID, "")
+		if len(m.sessions) == 0 {
+			return m, nil
 		}
-		return m, nil
+		id := m.sessions[m.cursor].ID
+		if v, ok := m.open[id]; ok {
+			// Already open: focus the live view, no replay needed.
+			return m, m.focus(v)
+		}
+		return m, m.openSession(id, "")
 	}
 	return m, nil
 }
 
-func (m *model) startDraft() {
-	if m.cancel != nil {
-		m.cancel()
-		m.cancel = nil
+// viewOf finds the open view for a session; nil when it was never opened
+// this run. The focused view answers for the draft's empty id.
+func (m *model) viewOf(id waggle.SessionID) *sview {
+	if m.sess.ID == id {
+		return m.sview
 	}
-	m.sess = hive.SessionInfo{}
-	m.draft = true
-	m.resetTranscript()
-	m.screen = screenChat
-	m.refresh(true)
+	return m.open[id]
 }
 
-func (m *model) resetTranscript() {
-	m.items = nil
-	m.byRef = map[string]int{}
-	m.lastSeq = 0
-	m.tokens = waggle.Cost{}
-	m.pulse = waggle.Pulse{}
-	m.errText = ""
-	m.working = false
-	m.steering = false
+// focus makes v the visible session. Whatever was focused keeps its
+// watch and its state; it just stops being drawn.
+func (m *model) focus(v *sview) tea.Cmd {
+	if m.sview == v {
+		m.screen = screenChat
+		return nil
+	}
+	m.ta.Blur()
+	m.sview = v
+	m.screen = screenChat
+	m.layout()
+	m.refresh(true)
+	return m.ta.Focus()
+}
+
+// startDraft opens a fresh conversation; running sessions keep running.
+func (m *model) startDraft() tea.Cmd {
+	if m.draft {
+		m.screen = screenChat
+		return nil
+	}
+	if m.scratch == nil {
+		m.scratch = newSview()
+	}
+	return m.focus(m.scratch)
+}
+
+// quitAll cancels every open session's watch on the way out.
+func (m *model) quitAll() {
+	for _, v := range m.open {
+		if v.cancel != nil {
+			v.cancel()
+		}
+	}
+}
+
+func (m *model) anyWorking() bool {
+	if m.working {
+		return true
+	}
+	for _, v := range m.open {
+		if v.working {
+			return true
+		}
+	}
+	return false
 }
 
 // verbs are what the hive is doing while a turn runs. One is picked per
@@ -479,68 +571,82 @@ func pickVerb(t time.Time) string {
 	return verbs[int(t.UnixNano()/1000)%len(verbs)]
 }
 
-// apply folds one event into the transcript and status.
-func (m *model) apply(ev waggle.Event) {
-	if ev.Seq != 0 && ev.Seq <= m.lastSeq {
+// apply folds one event into a session's transcript and status. Only the
+// focused view redraws; a background view just keeps its state current so
+// switching to it is instant.
+func (m *model) apply(v *sview, ev waggle.Event) {
+	if ev.Seq != 0 && ev.Seq <= v.lastSeq {
 		return
 	}
-	m.lastSeq = ev.Seq
+	v.lastSeq = ev.Seq
 	switch ev.Kind {
 	case waggle.KindPulse:
 		// A pulse carries the whole picture so far; replace, never add.
 		if p, ok := decode[waggle.Pulse](ev.Data); ok {
-			m.pulse = p
+			v.pulse = p
 		}
 		return
 	case waggle.KindCost:
 		if c, ok := decode[waggle.Cost](ev.Data); ok {
 			if c.Live {
 				// Older journals carried live snapshots as costs.
-				m.pulse.Usage = c
+				v.pulse.Usage = c
 				return
 			}
-			m.tokens.InputTokens += c.InputTokens
-			m.tokens.CachedInputTokens += c.CachedInputTokens
-			m.tokens.OutputTokens += c.OutputTokens
-			m.tokens.ReasoningTokens += c.ReasoningTokens
-			m.pulse.Usage = waggle.Cost{}
+			v.tokens.InputTokens += c.InputTokens
+			v.tokens.CachedInputTokens += c.CachedInputTokens
+			v.tokens.OutputTokens += c.OutputTokens
+			v.tokens.ReasoningTokens += c.ReasoningTokens
+			v.pulse.Usage = waggle.Cost{}
 		}
 		return
 	case waggle.KindResult:
-		m.working = false
-		m.pulse.Usage = waggle.Cost{}
-		m.finishRunningCards()
-		m.refresh(m.vp.AtBottom())
+		v.working = false
+		v.pulse.Usage = waggle.Cost{}
+		v.finishRunningCards()
+		m.touch(v, false)
 		return
 	case waggle.KindDied:
-		m.working = false
-		m.pulse.Usage = waggle.Cost{}
+		v.working = false
+		v.pulse.Usage = waggle.Cost{}
 	case waggle.KindMessage:
 		if ev.Bee == "human" {
-			m.working = true
-			m.steering = false
-			if m.started.IsZero() {
-				m.started = time.Now()
+			v.working = true
+			v.steering = false
+			if v.started.IsZero() {
+				v.started = time.Now()
 			}
-			if m.verb == "" {
-				m.verb = pickVerb(m.started)
+			if v.verb == "" {
+				v.verb = pickVerb(v.started)
 			}
 		}
 	case waggle.KindTool, waggle.KindEdit, waggle.KindPlan:
-		if idx, ok := m.byRef[refKey(ev)]; ok {
-			prev := m.items[idx]
+		if idx, ok := v.byRef[refKey(ev)]; ok {
+			prev := v.items[idx]
 			prev.ev = ev
 			prev.frozen = false
-			m.refresh(m.vp.AtBottom())
+			m.touch(v, false)
 			return
 		}
 	}
 	it := &item{ev: ev, start: ev.At}
-	m.items = append(m.items, it)
+	v.items = append(v.items, it)
 	if k := refKey(ev); k != "" {
-		m.byRef[k] = len(m.items) - 1
+		v.byRef[k] = len(v.items) - 1
 	}
-	m.refresh(m.vp.AtBottom() || m.vp.PastBottom())
+	m.touch(v, true)
+}
+
+// touch redraws the transcript when the changed view is the visible one.
+func (m *model) touch(v *sview, past bool) {
+	if v != m.sview {
+		return
+	}
+	follow := m.vp.AtBottom()
+	if past {
+		follow = follow || m.vp.PastBottom()
+	}
+	m.refresh(follow)
 }
 
 func refKey(ev waggle.Event) string {
@@ -563,8 +669,8 @@ func refKey(ev waggle.Event) string {
 
 // finishRunningCards marks any still-running card final so it stops
 // animating after the turn ends (stop, result, or death).
-func (m *model) finishRunningCards() {
-	for _, it := range m.items {
+func (v *sview) finishRunningCards() {
+	for _, it := range v.items {
 		it.frozen = true
 	}
 }

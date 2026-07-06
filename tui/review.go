@@ -200,9 +200,7 @@ func (m *model) keyReview(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	switch msg.String() {
 	case "ctrl+c":
-		if m.cancel != nil {
-			m.cancel()
-		}
+		m.quitAll()
 		return m, tea.Quit
 	case "q", "esc":
 		if m.rvFocus {
@@ -317,9 +315,7 @@ func (m *model) keyKeepConfirm(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 func (m *model) keyDraft(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c":
-		if m.cancel != nil {
-			m.cancel()
-		}
+		m.quitAll()
 		return m, tea.Quit
 	case "esc":
 		// Abandoning keeps the staging; that is just the a state.

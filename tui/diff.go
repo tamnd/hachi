@@ -51,9 +51,7 @@ func (m *model) applyDiff(msg diffMsg) {
 func (m *model) keyDiff(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c":
-		if m.cancel != nil {
-			m.cancel()
-		}
+		m.quitAll()
 		return m, tea.Quit
 	case "q", "esc", "d":
 		m.screen = screenChat
