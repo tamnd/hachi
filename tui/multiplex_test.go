@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -50,6 +51,10 @@ func (f *muxSvc) Commit(context.Context, waggle.SessionID, string) (string, erro
 }
 func (f *muxSvc) Restore(context.Context, waggle.SessionID, []string) (hive.RestoreReport, error) {
 	return hive.RestoreReport{}, nil
+}
+func (f *muxSvc) Queue(context.Context, waggle.SessionID, string) error { return nil }
+func (f *muxSvc) MergeBack(context.Context, waggle.SessionID) (hive.MergeReport, error) {
+	return hive.MergeReport{}, nil
 }
 
 // openView injects an opened session the way openedMsg would, without
@@ -177,5 +182,65 @@ func TestDraftSendOpensSecondSession(t *testing.T) {
 	}
 	if m.scratch != nil && m.scratch == m.sview {
 		t.Fatal("a spent draft must not stay focused")
+	}
+}
+
+func TestFolderBusyAskWaitAndCancel(t *testing.T) {
+	svc := &fakeSvc{}
+	m := newModel(svc, Options{Dir: "/tmp/plain", Brain: "codex"})
+	m.w, m.h = 100, 30
+	m.sess = hive.SessionInfo{ID: "s1", Title: "second task"}
+	m.open["s1"] = m.sview
+	m.layout()
+
+	// The refusal turns into the wait-or-cancel ask above the composer.
+	_, _ = m.Update(folderBusyMsg{id: "s1", text: "tidy the notes", with: "make a mess"})
+	out := m.viewActivity()
+	if !strings.Contains(out, `"make a mess"`) || !strings.Contains(out, "wait its turn") {
+		t.Fatalf("the ask must name the other session and offer the wait:\n%s", out)
+	}
+
+	// n cancels: the message goes back in the composer, nothing queued.
+	key(t, m, "n")
+	if m.busyAsk != "" || m.ta.Value() != "tidy the notes" {
+		t.Fatalf("cancel must restore the composer, ask=%q composer=%q", m.busyAsk, m.ta.Value())
+	}
+	if len(svc.queued) != 0 {
+		t.Fatalf("cancel must not queue, got %v", svc.queued)
+	}
+
+	// Refused again, y parks it with the engine and the card says so.
+	m.ta.Reset()
+	_, _ = m.Update(folderBusyMsg{id: "s1", text: "tidy the notes", with: "make a mess"})
+	key(t, m, "y")
+	if len(svc.queued) != 1 || svc.queued[0] != "tidy the notes" {
+		t.Fatalf("y must queue the refused message, got %v", svc.queued)
+	}
+	if !m.waiting {
+		t.Fatal("a queued message must show the waiting state")
+	}
+	if s := m.viewStatus(); !strings.Contains(s, "waiting for the folder") {
+		t.Errorf("the status line must say waiting, got %q", s)
+	}
+	if a := m.viewActivity(); !strings.Contains(a, "waiting for the folder") {
+		t.Errorf("the activity line must say waiting, got %q", a)
+	}
+
+	// A second message cannot pile on while one waits.
+	m.ta.SetValue("another thing")
+	key(t, m, "enter")
+	if len(svc.queued) != 1 {
+		t.Fatalf("no second queue entry while one waits, got %v", svc.queued)
+	}
+	if m.errText == "" {
+		t.Fatal("the refusal to pile on must say why")
+	}
+
+	// The queued turn starting is a plain human message on the watch;
+	// waiting hands over to working right there.
+	m.apply(m.sview, waggle.Event{Sess: "s1", Bee: "human", Kind: waggle.KindMessage,
+		Data: waggle.Enc(waggle.Message{Text: "tidy the notes"})})
+	if m.waiting {
+		t.Fatal("the human message arriving means the queued turn started")
 	}
 }

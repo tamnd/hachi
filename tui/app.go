@@ -5,6 +5,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -55,7 +56,10 @@ type sview struct {
 	vp       viewport.Model
 	ta       textarea.Model
 	working  bool
-	steering bool // turn stopped by esc, next send resumes
+	waiting  bool   // message queued behind a busy folder; flips to working when it starts
+	busyAsk  string // refused message pending the wait-or-cancel answer
+	busyWith string // title of the session holding the folder, may be empty
+	steering bool   // turn stopped by esc, next send resumes
 	started  time.Time
 	verb     string       // this turn's working verb
 	tokens   waggle.Cost  // settled usage, accumulated across turns
@@ -98,6 +102,7 @@ type model struct {
 	rvDraft   bool            // commit draft editor open
 	rvConfirm string          // restore pending confirm: a path, or * for everything
 	rvStatus  string          // last verb's outcome, shown in the footer
+	rvMergeQ  string          // merge-back pending confirm: the question, empty when none
 	rvGone    map[string]bool // restored this visit, drawn as ✗
 	rvVP      viewport.Model
 	rvTA      textarea.Model
@@ -178,6 +183,12 @@ type openedMsg struct {
 	send  string // message to send once the session is applied (draft flow)
 }
 type sentMsg struct{ id waggle.SessionID }
+type folderBusyMsg struct {
+	id   waggle.SessionID
+	text string // the message Send refused
+	with string // who holds the folder, may be empty
+}
+type queuedMsg struct{ id waggle.SessionID }
 type infoMsg struct{ info hive.SessionInfo }
 type stoppedMsg struct{ id waggle.SessionID }
 type tickMsg time.Time
@@ -250,10 +261,28 @@ func (m *model) refreshInfo() tea.Cmd {
 func (m *model) send(text string) tea.Cmd {
 	id := m.sess.ID
 	return func() tea.Msg {
-		if err := m.svc.Send(context.Background(), id, text); err != nil {
+		err := m.svc.Send(context.Background(), id, text)
+		if busy, ok := errors.AsType[*hive.FolderBusyError](err); ok {
+			// Not a failure: the folder has another writer and the
+			// human decides between waiting and cancelling.
+			return folderBusyMsg{id: id, text: text, with: busy.With}
+		}
+		if err != nil {
 			return errMsg{id: id, err: err}
 		}
 		return sentMsg{id: id}
+	}
+}
+
+// queueSend parks the refused message with the engine; the turn starts
+// by itself once the folder frees up.
+func (m *model) queueSend(text string) tea.Cmd {
+	id := m.sess.ID
+	return func() tea.Msg {
+		if err := m.svc.Queue(context.Background(), id, text); err != nil {
+			return errMsg{id: id, err: err}
+		}
+		return queuedMsg{id: id}
 	}
 }
 
@@ -326,6 +355,12 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.apply(v, msg.ev)
+		if v.working && !m.ticking {
+			// A queued turn starts without a sentMsg; the human message
+			// arriving on the watch is its starting gun.
+			m.ticking = true
+			return m, tea.Batch(waitEvent(msg.id, v.watch), tick())
+		}
 		return m, waitEvent(msg.id, v.watch)
 
 	case watchDoneMsg:
@@ -347,6 +382,25 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.ticking = true
 		return m, tick()
+
+	case folderBusyMsg:
+		v := m.viewOf(msg.id)
+		if v == nil {
+			v = m.sview
+		}
+		v.busyAsk, v.busyWith = msg.text, msg.with
+		v.working = false
+		return m, nil
+
+	case queuedMsg:
+		if v := m.viewOf(msg.id); v != nil {
+			v.waiting = true
+			v.errText = ""
+		}
+		return m, nil
+
+	case mergedMsg:
+		return m, m.applyMerged(msg)
 
 	case infoMsg:
 		if v := m.viewOf(msg.info.ID); v != nil {
@@ -436,6 +490,9 @@ func (m *model) key(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.screen == screenReview {
 		return m.keyReview(msg)
 	}
+	if m.busyAsk != "" {
+		return m.keyFolderBusy(msg)
+	}
 
 	switch msg.String() {
 	case "ctrl+c":
@@ -482,6 +539,10 @@ func (m *model) key(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.errText = "a turn is running; esc stops it first"
 			return m, nil
 		}
+		if m.waiting {
+			m.errText = "a message is already waiting for the folder"
+			return m, nil
+		}
 		m.ta.Reset()
 		m.layout()
 		if m.reqDiff != "" {
@@ -500,6 +561,23 @@ func (m *model) key(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	m.ta, cmd = m.ta.Update(msg)
 	m.layout()
 	return m, cmd
+}
+
+// keyFolderBusy answers the wait-or-cancel ask: y parks the message with
+// the engine, anything that reads as no puts it back in the composer.
+func (m *model) keyFolderBusy(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	text := m.busyAsk
+	m.busyAsk, m.busyWith = "", ""
+	switch msg.String() {
+	case "ctrl+c":
+		m.quitAll()
+		return m, tea.Quit
+	case "y", "Y", "enter":
+		return m, m.queueSend(text)
+	}
+	m.ta.SetValue(text)
+	m.layout()
+	return m, nil
 }
 
 func (m *model) keyList(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -639,6 +717,7 @@ func (m *model) apply(v *sview, ev waggle.Event) {
 	case waggle.KindMessage:
 		if ev.Bee == "human" {
 			v.working = true
+			v.waiting = false // a queued turn just started
 			v.steering = false
 			if v.started.IsZero() {
 				v.started = time.Now()
@@ -822,6 +901,16 @@ func (m *model) viewChat() string {
 // with elapsed time and tokens streaming in; the steer prompt after esc.
 func (m *model) viewActivity() string {
 	switch {
+	case m.busyAsk != "":
+		q := "Another session is already changing files in this folder; two at once would overwrite each other."
+		if m.busyWith != "" {
+			q = fmt.Sprintf("%q is already changing files in this folder; two at once would overwrite each other.", m.busyWith)
+		}
+		return " " + m.th.ToolBad.Render(truncate(q, m.w-24)) +
+			m.th.Faint.Render("  ") + m.th.StatusKey.Render("y") + m.th.Faint.Render(" wait its turn · ") +
+			m.th.StatusKey.Render("n") + m.th.Faint.Render(" cancel")
+	case m.waiting:
+		return " " + m.th.Faint.Render("◌ waiting for the folder · it starts when the other session is done")
 	case m.reqBanner != "" && !m.working:
 		return " " + m.th.StatusKey.Render(m.reqBanner) + m.th.Faint.Render(" · the diff rides along with your next message")
 	case m.working:
@@ -869,6 +958,8 @@ func (m *model) viewStatus() string {
 		left = " " + m.th.ToolBad.Render("× "+truncate(m.errText, m.w/2))
 	case m.working:
 		left = " " + m.th.Brain.Render("●") + m.th.StatusBar.Render(" working")
+	case m.waiting:
+		left = " " + m.th.Faint.Render("◌") + m.th.StatusBar.Render(" waiting for the folder")
 	default:
 		left = " " + m.th.Faint.Render("○") + m.th.StatusBar.Render(" idle")
 	}
@@ -952,6 +1043,9 @@ func (m *model) viewList() string {
 			// never shows the user one hachi did not mention.
 			detail = s.Branch + " · " + detail
 		}
+		if s.State == hive.StateWaiting {
+			detail = "waiting for the folder · " + detail
+		}
 		row := fmt.Sprintf("%s  %s  %s", stateDot(m.th, s.State), truncate(title, m.w-30),
 			m.th.Faint.Render(detail))
 		if i == m.cursor {
@@ -972,6 +1066,8 @@ func stateDot(t theme, s hive.State) string {
 		return t.Brain.Render("●")
 	case hive.StateNeeds:
 		return t.ToolBad.Render("●")
+	case hive.StateWaiting:
+		return t.Faint.Render("◌")
 	case hive.StateDied:
 		return t.ToolBad.Render("✗")
 	default:

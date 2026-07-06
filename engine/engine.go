@@ -29,6 +29,7 @@ type Engine struct {
 	running  map[waggle.SessionID]*turn
 	watchers map[waggle.SessionID]map[chan waggle.Event]struct{}
 	bases    map[waggle.SessionID]*baseline
+	queue    map[waggle.SessionID]string // parked messages waiting for their folder
 	nonce    uint64
 
 	// wtMu serializes worktree creation so racing sends cannot pick the
@@ -54,6 +55,7 @@ func New(j *journal.Files) *Engine {
 		running:  map[waggle.SessionID]*turn{},
 		watchers: map[waggle.SessionID]map[chan waggle.Event]struct{}{},
 		bases:    map[waggle.SessionID]*baseline{},
+		queue:    map[waggle.SessionID]string{},
 	}
 }
 
@@ -140,7 +142,6 @@ func (e *Engine) Send(ctx context.Context, id waggle.SessionID, msg string) erro
 		e.mu.Unlock()
 		return fmt.Errorf("engine: session %s already has a turn running", id)
 	}
-	e.state[id] = hive.StateWorking
 	e.mu.Unlock()
 
 	if m.Title == "" {
@@ -150,16 +151,31 @@ func (e *Engine) Send(ctx context.Context, id waggle.SessionID, msg string) erro
 		_ = e.Journal.SaveMeta(m)
 	}
 
-	// A second writer in one repo gets a private worktree before its
-	// first turn, so two sessions never interleave edits in one tree.
-	// One quiet line in the transcript is all the user sees of it.
-	if with, upgraded := e.maybeUpgrade(ctx, &m); upgraded {
-		text := "working in a private copy so it can't collide with another session here"
-		if with != "" {
-			text = fmt.Sprintf("working in a private copy so it can't collide with %q", with)
+	root, _ := gitOut(ctx, m.Dir, "rev-parse", "--show-toplevel")
+	if root == "" {
+		// No repo means no worktree to absorb a collision; a second
+		// writer is refused so the client can offer the wait. Check and
+		// state flip under one lock, or two racing sends both pass.
+		e.wtMu.Lock()
+		if om, busy := e.folderCollision(ctx, id, m.Dir); busy {
+			e.wtMu.Unlock()
+			return &hive.FolderBusyError{With: om.Title}
 		}
-		e.append(waggle.Event{Sess: id, Bee: "hachi", Kind: waggle.KindFinding, At: time.Now(),
-			Data: waggle.Enc(waggle.Message{Text: text})})
+		e.setState(id, hive.StateWorking)
+		e.wtMu.Unlock()
+	} else {
+		e.setState(id, hive.StateWorking)
+		// A second writer in one repo gets a private worktree before its
+		// first turn, so two sessions never interleave edits in one tree.
+		// One quiet line in the transcript is all the user sees of it.
+		if with, upgraded := e.maybeUpgrade(ctx, &m, root); upgraded {
+			text := "working in a private copy so it can't collide with another session here"
+			if with != "" {
+				text = fmt.Sprintf("working in a private copy so it can't collide with %q", with)
+			}
+			e.append(waggle.Event{Sess: id, Bee: "hachi", Kind: waggle.KindFinding, At: time.Now(),
+				Data: waggle.Enc(waggle.Message{Text: text})})
+		}
 	}
 
 	// The baseline must exist before the brain can touch a file: diff
@@ -233,6 +249,9 @@ func (e *Engine) pump(id waggle.SessionID, m journal.Meta, t *turn) {
 	e.state[id] = final
 	e.mu.Unlock()
 	close(t.done)
+	// This session leaving Working may be what a queued message in the
+	// same folder was waiting on.
+	e.dispatchQueued()
 }
 
 // Watch replays the session and then follows it live. The returned

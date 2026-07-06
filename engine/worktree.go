@@ -29,16 +29,12 @@ import (
 // and the colliding session's title. Only a session that has never
 // captured a baseline can move: once a session has worked in place, its
 // diff and undo promises are anchored there.
-func (e *Engine) maybeUpgrade(ctx context.Context, m *journal.Meta) (string, bool) {
+func (e *Engine) maybeUpgrade(ctx context.Context, m *journal.Meta, root string) (string, bool) {
 	if m.WorktreePath != "" {
 		return "", false // already in a private copy
 	}
 	if e.hasBaseline(m.ID) {
 		return "", false // worked in place before; it stays in place
-	}
-	root, err := gitOut(ctx, m.Dir, "rev-parse", "--show-toplevel")
-	if err != nil || root == "" {
-		return "", false // not a git repo; nothing to upgrade
 	}
 	other, ok := e.collision(ctx, m.ID, root)
 	if !ok {
