@@ -97,9 +97,6 @@ func TestCommitDraftAndCommit(t *testing.T) {
 	st := startScriptedTurn(t, e, info.ID) // Send("make a mess") names the session
 	runMess(t, dir)
 	st.finish()
-	if err := e.Stop(t.Context(), info.ID); err != nil { // wait out the turn so meta is saved
-		t.Fatal(err)
-	}
 
 	if _, err := e.Stage(context.Background(), info.ID, nil); err != nil {
 		t.Fatal(err)
