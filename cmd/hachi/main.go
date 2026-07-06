@@ -74,11 +74,17 @@ func run(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("no agent found; install codex (https://github.com/openai/codex) or pass --brain")
 	}
 
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return err
+	// HACHI_HOME points the hive somewhere else; demos and gates run on a
+	// throwaway one so the real journal never sees test sessions.
+	hive := os.Getenv("HACHI_HOME")
+	if hive == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return err
+		}
+		hive = filepath.Join(home, ".hachi")
 	}
-	j, err := journal.NewFiles(filepath.Join(home, ".hachi"))
+	j, err := journal.NewFiles(hive)
 	if err != nil {
 		return err
 	}
