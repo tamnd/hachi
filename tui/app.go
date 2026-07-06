@@ -84,6 +84,7 @@ type model struct {
 	scratch *sview                      // the one draft view, reused by ctrl+n
 	spin    spinner.Model
 	ticking bool // a 1s tick loop is running for some working session
+	stripOn bool // the attention strip is showing; layout reserves its row
 
 	// list
 	sessions []hive.SessionInfo
@@ -194,7 +195,7 @@ type stoppedMsg struct{ id waggle.SessionID }
 type tickMsg time.Time
 
 func (m *model) Init() tea.Cmd {
-	return tea.Batch(m.spin.Tick, m.ta.Focus(), tea.RequestBackgroundColor)
+	return tea.Batch(m.spin.Tick, m.ta.Focus(), tea.RequestBackgroundColor, stripTick())
 }
 
 func waitEvent(id waggle.SessionID, ch <-chan waggle.Event) tea.Cmd {
@@ -448,7 +449,15 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.cursor >= len(m.sessions) {
 			m.cursor = 0
 		}
+		if on := m.stripVisible(); on != m.stripOn {
+			m.stripOn = on
+			m.layout()
+			m.refresh(m.vp.AtBottom())
+		}
 		return m, nil
+
+	case stripTickMsg:
+		return m, tea.Batch(m.pollSessions(), stripTick())
 
 	case errMsg:
 		v := m.viewOf(msg.id)
@@ -815,13 +824,13 @@ func (m *model) layout() {
 	}
 	m.ta.SetWidth(m.w - 4) // composer border + padding
 	m.vp.SetWidth(m.w)
-	h := m.h - m.ta.Height() - 6 // header + activity + composer box + status
+	h := m.h - m.ta.Height() - 6 - m.stripRows() // header + activity + composer box + status
 	if h < 1 {
 		h = 1
 	}
 	m.vp.SetHeight(h)
 	m.dvp.SetWidth(m.w)
-	dh := m.h - 2 // header + hints
+	dh := m.h - 2 - m.stripRows() // header + hints
 	if dh < 1 {
 		dh = 1
 	}
@@ -832,7 +841,7 @@ func (m *model) layout() {
 		rw = 1
 	}
 	m.rvVP.SetWidth(rw)
-	rh := m.h - 3 // header + footer + status
+	rh := m.h - 3 - m.stripRows() // header + footer + status
 	if rh < 1 {
 		rh = 1
 	}
@@ -881,6 +890,9 @@ func (m *model) View() tea.View {
 		content = m.viewReview()
 	default:
 		content = m.viewChat()
+	}
+	if m.stripOn && m.w > 0 {
+		content = m.viewStrip() + "\n" + content
 	}
 	v := tea.NewView(content)
 	v.AltScreen = true
@@ -1057,7 +1069,7 @@ func (m *model) viewList() string {
 	}
 	b.WriteString("\n" + m.th.Faint.Render("enter open · n new · esc back"))
 	panel := m.th.ListBox.Render(b.String())
-	return lipgloss.Place(m.w, m.h, lipgloss.Center, lipgloss.Center, panel)
+	return lipgloss.Place(m.w, m.h-m.stripRows(), lipgloss.Center, lipgloss.Center, panel)
 }
 
 func stateDot(t theme, s hive.State) string {

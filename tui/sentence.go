@@ -59,7 +59,7 @@ func (m *model) viewSentence() string {
 	}
 	header := " " + m.th.Title.Render("what changed") + m.th.Faint.Render("  ──  "+truncate(title, m.w/2))
 
-	bodyH := m.h - 3
+	bodyH := m.h - 3 - m.stripRows()
 	if bodyH < 1 {
 		bodyH = 1
 	}

@@ -46,6 +46,12 @@ type SessionInfo struct {
 	Updated time.Time
 	InRepo  bool   // Dir sits inside a git repository; outside one, review defaults to the sentence view
 	Branch  string // hachi/<slug> when the session works in a private worktree copy; empty in place
+
+	// DiffReady says the session holds changes nobody has accepted yet.
+	// It is what the attention strip and board count as a diff waiting
+	// for review; it stays up until the changes are staged, committed,
+	// or undone.
+	DiffReady bool
 }
 
 // FileDiff is one file's baseline-to-now change. The engine computes it;

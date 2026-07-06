@@ -64,6 +64,7 @@ func (e *Engine) Restore(ctx context.Context, id waggle.SessionID, paths []strin
 		e.append(waggle.Event{Sess: id, Bee: "hachi", Kind: waggle.KindFinding, At: time.Now(),
 			Data: waggle.Enc(waggle.Message{Text: restoreMarker(rep)})})
 	}
+	e.refreshDirty(ctx, id)
 	// Undoing changes may clear the unreviewed flag a queued message
 	// in the same folder was waiting on.
 	go e.dispatchQueued()
