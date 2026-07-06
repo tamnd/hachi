@@ -30,6 +30,10 @@ type Engine struct {
 	watchers map[waggle.SessionID]map[chan waggle.Event]struct{}
 	bases    map[waggle.SessionID]*baseline
 	nonce    uint64
+
+	// wtMu serializes worktree creation so racing sends cannot pick the
+	// same slug or branch.
+	wtMu sync.Mutex
 }
 
 // turn is one in-flight run: its stream plus a channel that closes when
@@ -70,7 +74,7 @@ func (e *Engine) Sessions(ctx context.Context) ([]hive.SessionInfo, error) {
 		out = append(out, hive.SessionInfo{
 			ID: m.ID, Title: m.Title, Dir: m.Dir, Brain: m.Brain,
 			State: st, Created: m.Created, Updated: m.Updated,
-			InRepo: inRepo(m.Dir),
+			InRepo: inRepo(m.Dir), Branch: m.WorktreeBranch,
 		})
 	}
 	return out, nil
@@ -103,7 +107,7 @@ func (e *Engine) info(m journal.Meta) hive.SessionInfo {
 	if !ok {
 		st = hive.StateIdle
 	}
-	return hive.SessionInfo{ID: m.ID, Title: m.Title, Dir: m.Dir, Brain: m.Brain, State: st, Created: m.Created, Updated: m.Updated, InRepo: inRepo(m.Dir)}
+	return hive.SessionInfo{ID: m.ID, Title: m.Title, Dir: m.Dir, Brain: m.Brain, State: st, Created: m.Created, Updated: m.Updated, InRepo: inRepo(m.Dir), Branch: m.WorktreeBranch}
 }
 
 // inRepo walks up from dir looking for a .git entry, directory or file,
@@ -139,6 +143,25 @@ func (e *Engine) Send(ctx context.Context, id waggle.SessionID, msg string) erro
 	e.state[id] = hive.StateWorking
 	e.mu.Unlock()
 
+	if m.Title == "" {
+		// Saved now, not at turn end: session lists and collision
+		// notices need the title while the first turn is still running.
+		m.Title = title(msg)
+		_ = e.Journal.SaveMeta(m)
+	}
+
+	// A second writer in one repo gets a private worktree before its
+	// first turn, so two sessions never interleave edits in one tree.
+	// One quiet line in the transcript is all the user sees of it.
+	if with, upgraded := e.maybeUpgrade(ctx, &m); upgraded {
+		text := "working in a private copy so it can't collide with another session here"
+		if with != "" {
+			text = fmt.Sprintf("working in a private copy so it can't collide with %q", with)
+		}
+		e.append(waggle.Event{Sess: id, Bee: "hachi", Kind: waggle.KindFinding, At: time.Now(),
+			Data: waggle.Enc(waggle.Message{Text: text})})
+	}
+
 	// The baseline must exist before the brain can touch a file: diff
 	// and undo are promises made at the first turn, not at review time.
 	if _, err := e.ensureBaseline(ctx, id); err != nil {
@@ -147,10 +170,6 @@ func (e *Engine) Send(ctx context.Context, id waggle.SessionID, msg string) erro
 	}
 
 	e.append(waggle.Event{Sess: id, Bee: "human", Kind: waggle.KindMessage, At: time.Now(), Data: waggle.Enc(waggle.Message{Text: msg})})
-
-	if m.Title == "" {
-		m.Title = title(msg)
-	}
 
 	drv, err := adapter.Open(m.Brain)
 	if err != nil {

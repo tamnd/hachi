@@ -31,7 +31,8 @@ type SessionInfo struct {
 	State   State
 	Created time.Time
 	Updated time.Time
-	InRepo  bool // Dir sits inside a git repository; outside one, review defaults to the sentence view
+	InRepo  bool   // Dir sits inside a git repository; outside one, review defaults to the sentence view
+	Branch  string // hachi/<slug> when the session works in a private worktree copy; empty in place
 }
 
 // FileDiff is one file's baseline-to-now change. The engine computes it;
