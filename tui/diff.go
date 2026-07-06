@@ -34,7 +34,9 @@ func (m *model) openDiff() (tea.Model, tea.Cmd) {
 	m.diff, m.diffErr, m.diffMarks = nil, "", nil
 	m.diffLoading = true
 	m.layout()
-	return m, m.loadDiff()
+	// Opening the diff is seeing it: a finished run waiting on review
+	// stops needing you and parks in review.
+	return m, tea.Batch(m.loadDiff(), m.seen(m.sess.ID))
 }
 
 func (m *model) applyDiff(msg diffMsg) {

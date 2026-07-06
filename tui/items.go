@@ -142,7 +142,7 @@ func renderEvent(rc renderCtx, it *item) (string, bool) {
 		raw, _ := decode[waggle.Raw](ev.Data)
 		return t.Faint.Render(truncate(raw.Line, inner)), true
 	}
-	return "", true // spawned, pulse, cost, result, need_input live in the status bar
+	return "", true // spawned, pulse, cost, result, need_input, marker live in the status bar or nowhere
 }
 
 // outputClip is how many output lines a collapsed tool card shows.
