@@ -7,6 +7,8 @@ package engine
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -68,6 +70,7 @@ func (e *Engine) Sessions(ctx context.Context) ([]hive.SessionInfo, error) {
 		out = append(out, hive.SessionInfo{
 			ID: m.ID, Title: m.Title, Dir: m.Dir, Brain: m.Brain,
 			State: st, Created: m.Created, Updated: m.Updated,
+			InRepo: inRepo(m.Dir),
 		})
 	}
 	return out, nil
@@ -100,7 +103,24 @@ func (e *Engine) info(m journal.Meta) hive.SessionInfo {
 	if !ok {
 		st = hive.StateIdle
 	}
-	return hive.SessionInfo{ID: m.ID, Title: m.Title, Dir: m.Dir, Brain: m.Brain, State: st, Created: m.Created, Updated: m.Updated}
+	return hive.SessionInfo{ID: m.ID, Title: m.Title, Dir: m.Dir, Brain: m.Brain, State: st, Created: m.Created, Updated: m.Updated, InRepo: inRepo(m.Dir)}
+}
+
+// inRepo walks up from dir looking for a .git entry, directory or file,
+// so worktrees count too. A filesystem walk instead of git itself: this
+// only picks a default rendering, and the baseline still asks git for
+// the authoritative root when it matters.
+func inRepo(dir string) bool {
+	for d := dir; ; {
+		if _, err := os.Lstat(filepath.Join(d, ".git")); err == nil {
+			return true
+		}
+		parent := filepath.Dir(d)
+		if parent == d {
+			return false
+		}
+		d = parent
+	}
 }
 
 // Send starts a turn with the human's message. One turn per session at a

@@ -168,6 +168,26 @@ func TestCommitDraftAndCommit(t *testing.T) {
 	}
 }
 
+// InRepo picks the review rendering: sentence view outside a repo,
+// file tree inside one.
+func TestOpenReportsInRepo(t *testing.T) {
+	e := newEngine(t)
+	repo, err := e.Open(t.Context(), "", setupMessRepo(t), "fake")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !repo.InRepo {
+		t.Error("a git repo must report InRepo")
+	}
+	plain, err := e.Open(t.Context(), "", t.TempDir(), "fake")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plain.InRepo {
+		t.Error("a plain folder must not report InRepo")
+	}
+}
+
 func TestCommitRefusedOutsideGit(t *testing.T) {
 	dir := t.TempDir()
 	write(t, filepath.Join(dir, "a.txt"), []byte("a\n"), 0o644)
