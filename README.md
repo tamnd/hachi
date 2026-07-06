@@ -68,8 +68,10 @@ Four interfaces, each four methods or fewer, hold the whole system together: `ad
 The TUI is a pure client of `hive.Service` and never touches adapters or the journal; an architecture test enforces that boundary in CI, along with a hard budget on direct dependencies.
 The event stream (package `waggle`, after the bee dance) is the one contract everything shares.
 
-Sessions live under `~/.hachi/sessions/<id>/` as `events.jsonl` plus a small `meta.json`.
+Sessions live under `~/.hachi/sessions/<id>/` as `events.jsonl` plus a small `meta.json` (set `HACHI_HOME` to keep them elsewhere).
 They are plain files: `grep` them, `jq` them, back them up.
+
+Want to see the whole loop run against a real codex account without touching your own sessions? `demos/s0/demo.sh` drives the binary through a pty, checks the answer and the journal, and archives the evidence.
 
 ## Status
 
