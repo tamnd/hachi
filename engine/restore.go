@@ -150,9 +150,7 @@ func (e *Engine) restoreGit(ctx context.Context, b *baseline) (RestoreReport, er
 		}})
 	}
 
-	for _, skip := range caseCollisions(acts, func(a action) string { return a.path }) {
-		rep.Skipped = append(rep.Skipped, skip)
-	}
+	rep.Skipped = append(rep.Skipped, caseCollisions(acts, func(a action) string { return a.path })...)
 	collided := map[string]bool{}
 	for _, s := range rep.Skipped {
 		collided[s.Path] = true
