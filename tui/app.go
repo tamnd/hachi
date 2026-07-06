@@ -38,6 +38,7 @@ type screen int
 const (
 	screenChat screen = iota
 	screenList
+	screenDiff
 )
 
 type model struct {
@@ -72,6 +73,13 @@ type model struct {
 	// list
 	sessions []hive.SessionInfo
 	cursor   int
+
+	// diff-so-far
+	diff        []hive.FileDiff
+	diffErr     string
+	diffMarks   []int // content line where each file's section starts
+	diffLoading bool
+	dvp         viewport.Model
 }
 
 func newModel(svc hive.Service, opts Options) *model {
@@ -93,8 +101,9 @@ func newModel(svc hive.Service, opts Options) *model {
 		th: newTheme(true), md: newMDCache(true),
 		screen: screenChat, draft: true,
 		byRef: map[string]int{},
-		ta:    ta, spin: sp, vp: viewport.New(),
+		ta:    ta, spin: sp, vp: viewport.New(), dvp: viewport.New(),
 	}
+	m.dvp.FillHeight = true
 	m.applyTheme()
 	return m
 }
@@ -248,6 +257,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.finishRunningCards()
 		return m, nil
 
+	case diffMsg:
+		m.applyDiff(msg)
+		return m, nil
+
 	case sessionsMsg:
 		m.sessions = msg.list
 		if m.cursor >= len(m.sessions) {
@@ -284,6 +297,9 @@ func (m *model) key(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.screen == screenList {
 		return m.keyList(msg)
 	}
+	if m.screen == screenDiff {
+		return m.keyDiff(msg)
+	}
 
 	switch msg.String() {
 	case "ctrl+c":
@@ -317,6 +333,13 @@ func (m *model) key(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.ta.InsertString("\n")
 		m.layout()
 		return m, nil
+	case "d":
+		// Diff-so-far is one key from anywhere in the session, any
+		// moment, including mid-run. An empty composer is the tell that
+		// d is a command and not the start of a sentence.
+		if m.ta.Value() == "" && !m.draft {
+			return m.openDiff()
+		}
 	case "enter":
 		text := strings.TrimSpace(m.ta.Value())
 		if text == "" {
@@ -527,6 +550,12 @@ func (m *model) layout() {
 		h = 1
 	}
 	m.vp.SetHeight(h)
+	m.dvp.SetWidth(m.w)
+	dh := m.h - 2 // header + hints
+	if dh < 1 {
+		dh = 1
+	}
+	m.dvp.SetHeight(dh)
 }
 
 func (m *model) refresh(follow bool) {
@@ -563,6 +592,8 @@ func (m *model) View() tea.View {
 		content = "loading…"
 	case m.screen == screenList:
 		content = m.viewList()
+	case m.screen == screenDiff:
+		content = m.viewDiff()
 	default:
 		content = m.viewChat()
 	}
@@ -642,8 +673,11 @@ func (m *model) viewStatus() string {
 		}
 	}
 	help := m.th.StatusKey.Render("enter") + m.th.Faint.Render(" send  ") +
-		m.th.StatusKey.Render("esc") + m.th.Faint.Render(" stop  ") +
-		m.th.StatusKey.Render("^o") + m.th.Faint.Render(" expand  ") +
+		m.th.StatusKey.Render("esc") + m.th.Faint.Render(" stop  ")
+	if !m.draft {
+		help += m.th.StatusKey.Render("d") + m.th.Faint.Render(" diff  ")
+	}
+	help += m.th.StatusKey.Render("^o") + m.th.Faint.Render(" expand  ") +
 		m.th.StatusKey.Render("^l") + m.th.Faint.Render(" sessions  ") +
 		m.th.StatusKey.Render("^c") + m.th.Faint.Render(" quit ")
 	right := help

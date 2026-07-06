@@ -33,6 +33,18 @@ type SessionInfo struct {
 	Updated time.Time
 }
 
+// FileDiff is one file's baseline-to-now change. The engine computes it;
+// clients only color it. Patch holds unified hunks with no file headers,
+// since the client draws its own per-file section header.
+type FileDiff struct {
+	Path    string // relative to the session's root, slash-separated
+	Status  string // M modified, A added, D deleted
+	Outside bool   // the human changed it after the agent's last touch
+	Binary  bool
+	Patch   string // unified hunks; empty when Binary or when Note explains why
+	Note    string // plain sentence shown instead of a patch
+}
+
 // Service is the whole API between hachi's engine and any client.
 type Service interface {
 	// Sessions lists known sessions, newest first.
@@ -47,4 +59,8 @@ type Service interface {
 	Watch(ctx context.Context, id waggle.SessionID) (<-chan waggle.Event, error)
 	// Stop interrupts the running turn, leaving the session resumable.
 	Stop(ctx context.Context, id waggle.SessionID) error
+	// Changes computes the session's whole change set against its
+	// baseline, right now. Safe mid-run; every call recomputes, nothing
+	// is cached, so the result matches the tree at the moment of asking.
+	Changes(ctx context.Context, id waggle.SessionID) ([]FileDiff, error)
 }
