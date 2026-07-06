@@ -97,6 +97,9 @@ func TestReopenContinuesSequence(t *testing.T) {
 			t.Fatal("never saw the second turn's reply with a fresh sequence number")
 		}
 	}
+	// The reply fans out before the pump's final meta save; wait the turn
+	// out so nothing races the TempDir cleanup.
+	waitIdle(t, e2, info.ID)
 }
 
 func waitIdle(t *testing.T, e *engine.Engine, id waggle.SessionID) {

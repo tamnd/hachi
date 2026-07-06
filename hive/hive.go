@@ -31,6 +31,7 @@ type SessionInfo struct {
 	State   State
 	Created time.Time
 	Updated time.Time
+	InRepo  bool // Dir sits inside a git repository; outside one, review defaults to the sentence view
 }
 
 // FileDiff is one file's baseline-to-now change. The engine computes it;
@@ -42,6 +43,7 @@ type FileDiff struct {
 	Outside bool   // the human changed it after the agent's last touch
 	Staged  bool   // accepted through hachi: git-staged, or kept in non-git mode
 	Binary  bool
+	NoUndo  bool   // no saved copy of the old bytes; Restore cannot cover this file
 	Patch   string // unified hunks; empty when Binary or when Note explains why
 	Note    string // plain sentence shown instead of a patch
 }

@@ -451,19 +451,47 @@ func (b *baseline) outsideEdited(en *ManifestEntry) bool {
 
 // relPath turns an adapter-reported path into a manifest key relative to
 // root. Paths that escape the root are rejected; that is guard's turf,
-// not the baseline's.
+// not the baseline's. Agents report kernel-resolved paths while the root
+// keeps whatever spelling the session started from, so a miss gets one
+// retry with symlinks resolved on both sides: on macOS the temp tree is
+// /var/... to the shell and /private/var/... to everyone else.
 func relPath(root, p string) (string, error) {
 	if !filepath.IsAbs(p) {
 		p = filepath.Join(root, p)
 	}
 	rel, err := filepath.Rel(root, p)
+	if err != nil || escapesRoot(rel) {
+		rel, err = filepath.Rel(resolved(root), resolved(p))
+	}
 	if err != nil {
 		return "", err
 	}
-	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+	if escapesRoot(rel) {
 		return "", fmt.Errorf("engine: path %s outside %s", p, root)
 	}
 	return filepath.ToSlash(rel), nil
+}
+
+func escapesRoot(rel string) bool {
+	return rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// resolved canonicalizes p through any symlinked ancestors. p itself may
+// not exist yet (an edit event can announce a file before creating it),
+// so on a miss the walk moves to the parent and carries the tail along.
+func resolved(p string) string {
+	tail := ""
+	for d := p; ; {
+		if r, err := filepath.EvalSymlinks(d); err == nil {
+			return filepath.Join(r, tail)
+		}
+		parent := filepath.Dir(d)
+		if parent == d {
+			return p
+		}
+		tail = filepath.Join(filepath.Base(d), tail)
+		d = parent
+	}
 }
 
 func hashFile(path string) (string, error) {

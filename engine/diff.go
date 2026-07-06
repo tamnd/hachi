@@ -197,6 +197,7 @@ func manifestDiff(ctx context.Context, b *baseline, en *ManifestEntry) (hive.Fil
 			fd.Note = fmt.Sprintf("was a symlink to %s, now a regular file", en.LinkTarget)
 		}
 	case !en.Snapshotted:
+		fd.NoUndo = true
 		if en.SHA256 != "" {
 			fd.Note = "changed, but the old version was too big to keep a copy of"
 		} else {

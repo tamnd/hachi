@@ -97,9 +97,6 @@ func TestCommitDraftAndCommit(t *testing.T) {
 	st := startScriptedTurn(t, e, info.ID) // Send("make a mess") names the session
 	runMess(t, dir)
 	st.finish()
-	if err := e.Stop(t.Context(), info.ID); err != nil { // wait out the turn so meta is saved
-		t.Fatal(err)
-	}
 
 	if _, err := e.Stage(context.Background(), info.ID, nil); err != nil {
 		t.Fatal(err)
@@ -165,6 +162,26 @@ func TestCommitDraftAndCommit(t *testing.T) {
 	}
 	if !marked {
 		t.Error("no transcript marker for the commit")
+	}
+}
+
+// InRepo picks the review rendering: sentence view outside a repo,
+// file tree inside one.
+func TestOpenReportsInRepo(t *testing.T) {
+	e := newEngine(t)
+	repo, err := e.Open(t.Context(), "", setupMessRepo(t), "fake")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !repo.InRepo {
+		t.Error("a git repo must report InRepo")
+	}
+	plain, err := e.Open(t.Context(), "", t.TempDir(), "fake")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plain.InRepo {
+		t.Error("a plain folder must not report InRepo")
 	}
 }
 
