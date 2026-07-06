@@ -111,10 +111,12 @@ func (m *model) topNeed() (title, detail string) {
 			return 0
 		case "died":
 			return 1
-		case "diff":
+		case "stall":
 			return 2
+		case "diff":
+			return 3
 		}
-		return 3
+		return 4
 	}
 	best := -1
 	for i, s := range m.sessions {
@@ -139,6 +141,8 @@ func (m *model) topNeed() (title, detail string) {
 		switch s.Reason {
 		case "died":
 			detail = "the run died"
+		case "stall":
+			detail = "quiet too long"
 		case "diff":
 			detail = "changes to review"
 		default:
@@ -146,6 +150,18 @@ func (m *model) topNeed() (title, detail string) {
 		}
 	}
 	return title, detail
+}
+
+// keepWaiting forwards the w press: the engine clears the stall and
+// doubles this turn's quiet threshold. The local raise clears at once
+// so the notice drops without waiting a poll.
+func (m *model) keepWaiting() tea.Cmd {
+	id := m.sess.ID
+	m.sess.Reason, m.sess.Detail = "", ""
+	return func() tea.Msg {
+		_ = m.svc.KeepWaiting(context.Background(), id)
+		return nil
+	}
 }
 
 // seen tells the engine the human has looked: opening a diff parks its

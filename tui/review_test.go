@@ -44,8 +44,9 @@ func (f *fakeSvc) MergeBack(context.Context, waggle.SessionID) (hive.MergeReport
 func (f *fakeSvc) Watch(context.Context, waggle.SessionID) (<-chan waggle.Event, error) {
 	return nil, nil
 }
-func (f *fakeSvc) Stop(context.Context, waggle.SessionID) error { return nil }
-func (f *fakeSvc) Seen(context.Context, waggle.SessionID) error { return nil }
+func (f *fakeSvc) Stop(context.Context, waggle.SessionID) error        { return nil }
+func (f *fakeSvc) Seen(context.Context, waggle.SessionID) error        { return nil }
+func (f *fakeSvc) KeepWaiting(context.Context, waggle.SessionID) error { return nil }
 func (f *fakeSvc) Changes(context.Context, waggle.SessionID) ([]hive.FileDiff, error) {
 	return f.diffs, nil
 }
