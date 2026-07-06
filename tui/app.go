@@ -59,7 +59,7 @@ type sview struct {
 	waiting  bool   // message queued behind a busy folder; flips to working when it starts
 	busyAsk  string // refused message pending the wait-or-cancel answer
 	busyWith string // title of the session holding the folder, may be empty
-	steering bool // turn stopped by esc, next send resumes
+	steering bool   // turn stopped by esc, next send resumes
 	started  time.Time
 	verb     string       // this turn's working verb
 	tokens   waggle.Cost  // settled usage, accumulated across turns
