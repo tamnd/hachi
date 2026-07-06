@@ -82,6 +82,9 @@ func (e *Engine) Stage(ctx context.Context, id waggle.SessionID, paths []string)
 		en.Staged = true
 	}
 	_ = b.saveManifest()
+	// Accepting changes may clear the unreviewed flag a queued message
+	// in the same folder was waiting on.
+	go e.dispatchQueued()
 	return picked, nil
 }
 

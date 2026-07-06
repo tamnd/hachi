@@ -22,13 +22,25 @@ type fakeSvc struct {
 	draft    string
 	draftErr error
 	nonGit   bool
+	branch   string           // worktree branch the fake session reports
+	merges   int              // MergeBack calls
+	mergeRep hive.MergeReport // what MergeBack answers
+	queued   []string         // Queue calls
 }
 
 func (f *fakeSvc) Sessions(context.Context) ([]hive.SessionInfo, error) { return nil, nil }
 func (f *fakeSvc) Open(_ context.Context, id waggle.SessionID, dir, brain string) (hive.SessionInfo, error) {
-	return hive.SessionInfo{ID: "s1", Title: "make a mess", Dir: dir, Brain: brain, InRepo: !f.nonGit}, nil
+	return hive.SessionInfo{ID: "s1", Title: "make a mess", Dir: dir, Brain: brain, InRepo: !f.nonGit, Branch: f.branch}, nil
 }
 func (f *fakeSvc) Send(context.Context, waggle.SessionID, string) error { return nil }
+func (f *fakeSvc) Queue(_ context.Context, _ waggle.SessionID, msg string) error {
+	f.queued = append(f.queued, msg)
+	return nil
+}
+func (f *fakeSvc) MergeBack(context.Context, waggle.SessionID) (hive.MergeReport, error) {
+	f.merges++
+	return f.mergeRep, nil
+}
 func (f *fakeSvc) Watch(context.Context, waggle.SessionID) (<-chan waggle.Event, error) {
 	return nil, nil
 }
@@ -289,5 +301,67 @@ func TestRequestChanges(t *testing.T) {
 	}
 	if len(svc.restored)+len(svc.staged)+len(svc.commits) != 0 {
 		t.Error("r must not restore, stage, or commit anything")
+	}
+}
+
+func TestReviewMergeAsk(t *testing.T) {
+	svc := &fakeSvc{diffs: reviewGallery(), draft: "Make a mess\n", branch: "hachi/make-a-mess",
+		mergeRep: hive.MergeReport{Branch: "hachi/make-a-mess", Merged: true, Cleaned: true,
+			Detail: "merged hachi/make-a-mess into main"}}
+	m := newReviewModel(t, svc)
+	m.sess.Branch = "hachi/make-a-mess"
+
+	if out := m.viewReview(); !strings.Contains(out, "m merge into main") {
+		t.Errorf("a worktree session's review needs the merge hint:\n%s", out)
+	}
+
+	// Commit on the branch, and the one question follows.
+	key(t, m, "A")
+	key(t, m, "ctrl+d")
+	if m.rvMergeQ == "" {
+		t.Fatal("committing on a branch must offer the merge")
+	}
+	if out := m.viewReview(); !strings.Contains(out, "Bring it into main now?") {
+		t.Errorf("the ask must be visible in the footer:\n%s", out)
+	}
+
+	// Not yet is always safe, and m re-offers later.
+	key(t, m, "n")
+	if svc.merges != 0 {
+		t.Fatal("n must not merge")
+	}
+	if !strings.Contains(m.rvStatus, "m brings it into main later") {
+		t.Errorf("declining should say how to come back, got %q", m.rvStatus)
+	}
+	key(t, m, "m")
+	if m.rvMergeQ == "" {
+		t.Fatal("m must re-offer the merge")
+	}
+
+	// Yes merges, and git's sentence lands in the status line.
+	key(t, m, "y")
+	if svc.merges != 1 {
+		t.Fatalf("y must call MergeBack once, got %d", svc.merges)
+	}
+	if !strings.Contains(m.rvStatus, "merged hachi/make-a-mess into main") {
+		t.Errorf("the merge outcome must surface, got %q", m.rvStatus)
+	}
+}
+
+func TestReviewMergeAskAbsentInPlace(t *testing.T) {
+	svc := &fakeSvc{diffs: reviewGallery(), draft: "Make a mess\n"}
+	m := newReviewModel(t, svc)
+
+	if out := m.viewReview(); strings.Contains(out, "merge into main") {
+		t.Errorf("an in-place session has no branch; no merge hint:\n%s", out)
+	}
+	key(t, m, "A")
+	key(t, m, "ctrl+d")
+	if m.rvMergeQ != "" {
+		t.Fatal("no branch, no merge question")
+	}
+	key(t, m, "m")
+	if m.rvMergeQ != "" {
+		t.Fatal("m must do nothing without a branch")
 	}
 }

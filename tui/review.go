@@ -35,11 +35,15 @@ type restoredMsg struct {
 	blanket bool
 	err     error
 }
+type mergedMsg struct {
+	rep hive.MergeReport
+	err error
+}
 
 func (m *model) openReview() (tea.Model, tea.Cmd) {
 	m.screen = screenReview
 	m.rvSel, m.rvFocus, m.rvDraft = 0, false, false
-	m.rvConfirm, m.rvStatus = "", ""
+	m.rvConfirm, m.rvStatus, m.rvMergeQ = "", "", ""
 	m.rvAskKeep, m.rvKeep, m.rvBtn = false, nil, 0
 	m.rvGone = map[string]bool{}
 	if !m.rvChose {
@@ -94,6 +98,14 @@ func (m *model) restore(paths []string) tea.Cmd {
 	}
 }
 
+func (m *model) mergeBack() tea.Cmd {
+	id := m.sess.ID
+	return func() tea.Msg {
+		rep, err := m.svc.MergeBack(context.Background(), id)
+		return mergedMsg{rep: rep, err: err}
+	}
+}
+
 // applyReview folds a verb's result back into the screen.
 
 func (m *model) applyStaged(msg stagedMsg) tea.Cmd {
@@ -144,7 +156,27 @@ func (m *model) applyCommitted(msg committedMsg) tea.Cmd {
 		return nil
 	}
 	m.rvStatus = firstLine(msg.out)
+	if m.sess.Branch != "" {
+		// The commit landed on the session branch, one step short of
+		// the user's checkout; offer the last step right here.
+		m.rvMergeQ = fmt.Sprintf("Committed on %s. Bring it into main now? y merges, n leaves the branch", m.sess.Branch)
+	}
 	return m.loadDiff()
+}
+
+func (m *model) applyMerged(msg mergedMsg) tea.Cmd {
+	if msg.err != nil {
+		m.rvStatus = "× " + msg.err.Error()
+		return nil
+	}
+	if !msg.rep.Merged {
+		// Blocked or conflicted; the report says which in one sentence.
+		m.rvStatus = "× " + msg.rep.Detail
+		return nil
+	}
+	m.rvStatus = msg.rep.Detail
+	// The branch may be gone now; the header and list re-read the session.
+	return tea.Batch(m.loadDiff(), m.refreshInfo())
 }
 
 func (m *model) applyRestored(msg restoredMsg) tea.Cmd {
@@ -194,6 +226,9 @@ func (m *model) keyReview(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.rvConfirm != "" {
 		return m.keyConfirm(msg)
+	}
+	if m.rvMergeQ != "" {
+		return m.keyMergeConfirm(msg)
 	}
 	if m.rvAskKeep {
 		return m.keyKeepConfirm(msg)
@@ -269,12 +304,32 @@ func (m *model) keyReview(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.requestChanges()
 	case "R":
 		return m, m.loadDiff()
+	case "m":
+		// Re-offer merge-back any time on a worktree session; a "not
+		// yet" at commit time is never the last word.
+		if m.sess.Branch != "" {
+			m.rvMergeQ = fmt.Sprintf("Bring %s into main now? y merges, n leaves the branch", m.sess.Branch)
+		}
+		return m, nil
 	}
 	if m.rvFocus {
 		var cmd tea.Cmd
 		m.rvVP, cmd = m.rvVP.Update(msg)
 		return m, cmd
 	}
+	return m, nil
+}
+
+// keyMergeConfirm answers the merge-back offer: y runs it in the user's
+// checkout, anything that reads as no leaves the branch for later.
+func (m *model) keyMergeConfirm(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	m.rvMergeQ = ""
+	switch msg.String() {
+	case "y", "Y", "enter":
+		m.rvStatus = "merging…"
+		return m, m.mergeBack()
+	}
+	m.rvStatus = fmt.Sprintf("committed on %s · m brings it into main later", m.sess.Branch)
 	return m, nil
 }
 
@@ -524,6 +579,9 @@ func (m *model) viewDraft(height int) string {
 }
 
 func (m *model) viewReviewFooter() string {
+	if m.rvMergeQ != "" {
+		return " " + m.th.ToolBad.Render(m.rvMergeQ)
+	}
 	if m.rvAskKeep {
 		return " " + m.th.ToolBad.Render(m.keepQuestion())
 	}
@@ -541,8 +599,11 @@ func (m *model) viewReviewFooter() string {
 		m.th.StatusKey.Render("A") + m.th.Faint.Render(" stage+commit · ") +
 		m.th.StatusKey.Render("d") + m.th.Faint.Render(" restore · ") +
 		m.th.StatusKey.Render("u") + m.th.Faint.Render(" undo all · ") +
-		m.th.StatusKey.Render("r") + m.th.Faint.Render(" request changes · ") +
-		m.th.StatusKey.Render("s") + m.th.Faint.Render(" plain summary · ") +
+		m.th.StatusKey.Render("r") + m.th.Faint.Render(" request changes · ")
+	if m.sess.Branch != "" {
+		hints += m.th.StatusKey.Render("m") + m.th.Faint.Render(" merge into main · ")
+	}
+	hints += m.th.StatusKey.Render("s") + m.th.Faint.Render(" plain summary · ") +
 		m.th.StatusKey.Render("q") + m.th.Faint.Render(" back")
 	if m.rvStatus != "" {
 		status := m.rvStatus

@@ -19,8 +19,21 @@ const (
 	StateIdle    State = "idle"    // waiting for the human's next message
 	StateWorking State = "working" // a turn is running
 	StateNeeds   State = "needs"   // blocked on the human mid-run
+	StateWaiting State = "waiting" // a queued message waits for the folder to free up
 	StateDied    State = "died"    // last turn ended abnormally
 )
+
+// FolderBusyError is Send's refusal to start a second writer in a
+// non-git folder that already has an active session. In a repo a
+// worktree absorbs the collision; outside one the honest options are
+// waiting or cancelling, so the client asks and Queue is the wait.
+type FolderBusyError struct {
+	With string // title of the session holding the folder, may be empty
+}
+
+func (e *FolderBusyError) Error() string {
+	return "another session is already changing files in this folder"
+}
 
 // SessionInfo is what lists and boards render.
 type SessionInfo struct {
@@ -61,6 +74,18 @@ type RestoreReport struct {
 	Skipped  []RestoreSkip
 }
 
+// MergeReport says what MergeBack did: flags a client can branch on and
+// one sentence it can print as-is. At most one of Merged, Conflict, or
+// a non-empty Blocked is set.
+type MergeReport struct {
+	Branch   string   // the session branch, hachi/<slug>
+	Merged   bool     // the branch's commits are now in the user's checkout
+	Cleaned  bool     // worktree removed, branch deleted, session back in place
+	Conflict bool     // the merge conflicted and was aborted; nothing changed
+	Blocked  []string // files dirty in the user's checkout that the branch also touches
+	Detail   string   // one plain sentence for the human
+}
+
 // Service is the whole API between hachi's engine and any client.
 type Service interface {
 	// Sessions lists known sessions, newest first.
@@ -69,7 +94,15 @@ type Service interface {
 	// given brain when id is empty.
 	Open(ctx context.Context, id waggle.SessionID, dir, brain string) (SessionInfo, error)
 	// Send delivers the human's message to a session, starting a turn.
+	// In a non-git folder another session is already writing in, it
+	// refuses with a FolderBusyError instead of starting; Queue is the
+	// way to wait.
 	Send(ctx context.Context, id waggle.SessionID, msg string) error
+	// Queue parks a message until the session's folder has no other
+	// active writer, then starts the turn as if Send had run at that
+	// moment. The session shows StateWaiting until then. Queued
+	// messages live in memory only; they do not survive a restart.
+	Queue(ctx context.Context, id waggle.SessionID, msg string) error
 	// Watch streams a session: full replay first, then live events until
 	// ctx ends. The channel closes when ctx is done.
 	Watch(ctx context.Context, id waggle.SessionID) (<-chan waggle.Event, error)
@@ -98,4 +131,11 @@ type Service interface {
 	// explicit path restores even a flagged file, because naming it is
 	// the confirmation.
 	Restore(ctx context.Context, id waggle.SessionID, paths []string) (RestoreReport, error)
+	// MergeBack brings a worktree session's branch into the user's own
+	// checkout: fast-forward when possible, a real merge commit
+	// otherwise. It refuses while the checkout has uncommitted changes
+	// in files the branch touches, aborts cleanly on conflict, and on
+	// success removes the worktree and deletes the branch. It never
+	// touches the user's own uncommitted work.
+	MergeBack(ctx context.Context, id waggle.SessionID) (MergeReport, error)
 }
