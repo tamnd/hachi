@@ -58,6 +58,8 @@ func (m *model) keyDiff(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "q", "esc", "d":
 		m.screen = screenChat
 		return m, nil
+	case "r":
+		return m.openReview()
 	case "R":
 		return m, m.loadDiff()
 	case "n":
@@ -205,6 +207,7 @@ func (m *model) viewDiff() string {
 
 	hints := " " + m.th.StatusKey.Render("j/k") + m.th.Faint.Render(" scroll · ") +
 		m.th.StatusKey.Render("n/p") + m.th.Faint.Render(" file · ") +
+		m.th.StatusKey.Render("r") + m.th.Faint.Render(" review · ") +
 		m.th.StatusKey.Render("R") + m.th.Faint.Render(" refresh · ") +
 		m.th.StatusKey.Render("q") + m.th.Faint.Render(" back")
 	return header + "\n" + body + "\n" + hints

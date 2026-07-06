@@ -39,6 +39,7 @@ const (
 	screenChat screen = iota
 	screenList
 	screenDiff
+	screenReview
 )
 
 type model struct {
@@ -80,6 +81,18 @@ type model struct {
 	diffMarks   []int // content line where each file's section starts
 	diffLoading bool
 	dvp         viewport.Model
+
+	// review
+	rvSel     int  // 0 is the summary row, files start at 1
+	rvFocus   bool // diff pane focused; j/k scroll instead of moving the tree
+	rvDraft   bool // commit draft editor open
+	rvConfirm string          // restore pending confirm: a path, or * for everything
+	rvStatus  string          // last verb's outcome, shown in the footer
+	rvGone    map[string]bool // restored this visit, drawn as ✗
+	rvVP      viewport.Model
+	rvTA      textarea.Model
+	reqBanner string // composer banner after request-changes
+	reqDiff   string // diff text riding along with the next message
 }
 
 func newModel(svc hive.Service, opts Options) *model {
@@ -96,14 +109,23 @@ func newModel(svc hive.Service, opts Options) *model {
 
 	sp := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 
+	rta := textarea.New()
+	rta.Prompt = ""
+	rta.CharLimit = 0
+	rta.ShowLineNumbers = false
+	rta.SetVirtualCursor(true)
+
 	m := &model{
 		svc: svc, opts: opts,
 		th: newTheme(true), md: newMDCache(true),
 		screen: screenChat, draft: true,
-		byRef: map[string]int{},
-		ta:    ta, spin: sp, vp: viewport.New(), dvp: viewport.New(),
+		byRef:  map[string]int{},
+		rvGone: map[string]bool{},
+		ta:     ta, spin: sp, vp: viewport.New(), dvp: viewport.New(), rvVP: viewport.New(),
+		rvTA: rta,
 	}
 	m.dvp.FillHeight = true
+	m.rvVP.FillHeight = true
 	m.applyTheme()
 	return m
 }
@@ -259,7 +281,25 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case diffMsg:
 		m.applyDiff(msg)
+		if m.screen == screenReview {
+			if m.rvSel > len(m.diff) {
+				m.rvSel = len(m.diff)
+			}
+			m.renderReview()
+		}
 		return m, nil
+
+	case stagedMsg:
+		return m, m.applyStaged(msg)
+
+	case draftMsg:
+		return m, m.applyDraft(msg)
+
+	case committedMsg:
+		return m, m.applyCommitted(msg)
+
+	case restoredMsg:
+		return m, m.applyRestored(msg)
 
 	case sessionsMsg:
 		m.sessions = msg.list
@@ -299,6 +339,9 @@ func (m *model) key(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.screen == screenDiff {
 		return m.keyDiff(msg)
+	}
+	if m.screen == screenReview {
+		return m.keyReview(msg)
 	}
 
 	switch msg.String() {
@@ -351,6 +394,12 @@ func (m *model) key(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		m.ta.Reset()
 		m.layout()
+		if m.reqDiff != "" {
+			// Request-changes: the agent sees its own diff and the
+			// complaint together, same session, same thread.
+			text += "\n\nHere is your diff so far, the changes I am asking about:\n```diff\n" + m.reqDiff + "\n```"
+			m.reqDiff, m.reqBanner = "", ""
+		}
 		if m.draft {
 			return m, m.openSession("", text)
 		}
@@ -556,6 +605,19 @@ func (m *model) layout() {
 		dh = 1
 	}
 	m.dvp.SetHeight(dh)
+
+	rw := m.w - m.rvTreeWidth()
+	if rw < 1 {
+		rw = 1
+	}
+	m.rvVP.SetWidth(rw)
+	rh := m.h - 3 // header + footer + status
+	if rh < 1 {
+		rh = 1
+	}
+	m.rvVP.SetHeight(rh)
+	m.rvTA.SetWidth(rw - 6)
+	m.rvTA.SetHeight(min(10, max(3, rh-6)))
 }
 
 func (m *model) refresh(follow bool) {
@@ -594,6 +656,8 @@ func (m *model) View() tea.View {
 		content = m.viewList()
 	case m.screen == screenDiff:
 		content = m.viewDiff()
+	case m.screen == screenReview:
+		content = m.viewReview()
 	default:
 		content = m.viewChat()
 	}
@@ -616,6 +680,8 @@ func (m *model) viewChat() string {
 // with elapsed time and tokens streaming in; the steer prompt after esc.
 func (m *model) viewActivity() string {
 	switch {
+	case m.reqBanner != "" && !m.working:
+		return " " + m.th.StatusKey.Render(m.reqBanner) + m.th.Faint.Render(" · the diff rides along with your next message")
 	case m.working:
 		s := " " + m.spin.View() + " " + m.th.Brain.Render(m.verb+"…")
 		parts := []string{time.Since(m.started).Round(time.Second).String()}
