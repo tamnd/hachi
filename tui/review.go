@@ -523,7 +523,7 @@ func (m *model) viewReview() string {
 	}
 	header := " " + m.th.Title.Render("review") + m.th.Faint.Render("  ──  "+mid+"  ──  ") + meta
 
-	bodyH := m.h - 3
+	bodyH := m.h - 3 - m.stripRows()
 	if bodyH < 1 {
 		bodyH = 1
 	}

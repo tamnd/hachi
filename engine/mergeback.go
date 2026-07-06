@@ -114,6 +114,7 @@ func (e *Engine) MergeBack(ctx context.Context, id waggle.SessionID) (hive.Merge
 		// in the checkout with a fresh one.
 		e.mu.Lock()
 		delete(e.bases, id)
+		delete(e.dirty, id)
 		e.mu.Unlock()
 		_ = os.RemoveAll(filepath.Join(e.Journal.SessionDir(id), "baseline"))
 		rep.Cleaned = true

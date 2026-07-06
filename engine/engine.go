@@ -30,6 +30,7 @@ type Engine struct {
 	watchers map[waggle.SessionID]map[chan waggle.Event]struct{}
 	bases    map[waggle.SessionID]*baseline
 	queue    map[waggle.SessionID]string // parked messages waiting for their folder
+	dirty    map[waggle.SessionID]bool   // unaccepted changes on disk; what DiffReady reports
 	nonce    uint64
 
 	// wtMu serializes worktree creation so racing sends cannot pick the
@@ -56,6 +57,7 @@ func New(j *journal.Files) *Engine {
 		watchers: map[waggle.SessionID]map[chan waggle.Event]struct{}{},
 		bases:    map[waggle.SessionID]*baseline{},
 		queue:    map[waggle.SessionID]string{},
+		dirty:    map[waggle.SessionID]bool{},
 	}
 }
 
@@ -77,6 +79,7 @@ func (e *Engine) Sessions(ctx context.Context) ([]hive.SessionInfo, error) {
 			ID: m.ID, Title: m.Title, Dir: m.Dir, Brain: m.Brain,
 			State: st, Created: m.Created, Updated: m.Updated,
 			InRepo: inRepo(m.Dir), Branch: m.WorktreeBranch,
+			DiffReady: e.dirty[m.ID],
 		})
 	}
 	return out, nil
@@ -105,11 +108,12 @@ func (e *Engine) Open(ctx context.Context, id waggle.SessionID, dir, brain strin
 func (e *Engine) info(m journal.Meta) hive.SessionInfo {
 	e.mu.Lock()
 	st, ok := e.state[m.ID]
+	dirty := e.dirty[m.ID]
 	e.mu.Unlock()
 	if !ok {
 		st = hive.StateIdle
 	}
-	return hive.SessionInfo{ID: m.ID, Title: m.Title, Dir: m.Dir, Brain: m.Brain, State: st, Created: m.Created, Updated: m.Updated, InRepo: inRepo(m.Dir), Branch: m.WorktreeBranch}
+	return hive.SessionInfo{ID: m.ID, Title: m.Title, Dir: m.Dir, Brain: m.Brain, State: st, Created: m.Created, Updated: m.Updated, InRepo: inRepo(m.Dir), Branch: m.WorktreeBranch, DiffReady: dirty}
 }
 
 // inRepo walks up from dir looking for a .git entry, directory or file,
@@ -248,6 +252,9 @@ func (e *Engine) pump(id waggle.SessionID, m journal.Meta, t *turn) {
 	delete(e.running, id)
 	e.state[id] = final
 	e.mu.Unlock()
+	// Recompute before the done signal: Stop waits on it, and a client
+	// asking for the session right after Stop must see fresh DiffReady.
+	e.refreshDirty(context.Background(), id)
 	close(t.done)
 	// This session leaving Working may be what a queued message in the
 	// same folder was waiting on.
@@ -369,6 +376,21 @@ func (e *Engine) append(ev waggle.Event) {
 func (e *Engine) setState(id waggle.SessionID, s hive.State) {
 	e.mu.Lock()
 	e.state[id] = s
+	e.mu.Unlock()
+}
+
+// refreshDirty recomputes whether a session holds unaccepted changes.
+// Called at the moments the answer can change: a turn ends, changes are
+// staged, committed, or undone, or a merged worktree goes away. The
+// check runs unlocked; only the flag write takes the lock.
+func (e *Engine) refreshDirty(ctx context.Context, id waggle.SessionID) {
+	v := e.unreviewed(ctx, id)
+	e.mu.Lock()
+	if v {
+		e.dirty[id] = true
+	} else {
+		delete(e.dirty, id)
+	}
 	e.mu.Unlock()
 }
 

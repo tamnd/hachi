@@ -82,6 +82,7 @@ func (e *Engine) Stage(ctx context.Context, id waggle.SessionID, paths []string)
 		en.Staged = true
 	}
 	_ = b.saveManifest()
+	e.refreshDirty(ctx, id)
 	// Accepting changes may clear the unreviewed flag a queued message
 	// in the same folder was waiting on.
 	go e.dispatchQueued()
@@ -264,5 +265,6 @@ func (e *Engine) Commit(ctx context.Context, id waggle.SessionID, message string
 	e.ensureSeq(id)
 	e.append(waggle.Event{Sess: id, Bee: "hachi", Kind: waggle.KindFinding, At: time.Now(),
 		Data: waggle.Enc(waggle.Message{Text: fmt.Sprintf("committed %s: %s", sha, first)})})
+	e.refreshDirty(ctx, id)
 	return output, nil
 }
