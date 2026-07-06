@@ -83,9 +83,9 @@ type model struct {
 	dvp         viewport.Model
 
 	// review
-	rvSel     int  // 0 is the summary row, files start at 1
-	rvFocus   bool // diff pane focused; j/k scroll instead of moving the tree
-	rvDraft   bool // commit draft editor open
+	rvSel     int             // 0 is the summary row, files start at 1
+	rvFocus   bool            // diff pane focused; j/k scroll instead of moving the tree
+	rvDraft   bool            // commit draft editor open
 	rvConfirm string          // restore pending confirm: a path, or * for everything
 	rvStatus  string          // last verb's outcome, shown in the footer
 	rvGone    map[string]bool // restored this visit, drawn as ✗
