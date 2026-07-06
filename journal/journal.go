@@ -53,6 +53,12 @@ func (f *Files) dir(id waggle.SessionID) string {
 	return filepath.Join(f.Root, "sessions", string(id))
 }
 
+// SessionDir returns the directory a session's files live in. The engine
+// keeps the baseline snapshot next to the events it explains.
+func (f *Files) SessionDir(id waggle.SessionID) string {
+	return f.dir(id)
+}
+
 // Append writes one event to its session file.
 func (f *Files) Append(e waggle.Event) error {
 	f.mu.Lock()

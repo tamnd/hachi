@@ -26,6 +26,7 @@ type Engine struct {
 	state    map[waggle.SessionID]hive.State
 	running  map[waggle.SessionID]*turn
 	watchers map[waggle.SessionID]map[chan waggle.Event]struct{}
+	bases    map[waggle.SessionID]*baseline
 	nonce    uint64
 }
 
@@ -46,6 +47,7 @@ func New(j *journal.Files) *Engine {
 		state:    map[waggle.SessionID]hive.State{},
 		running:  map[waggle.SessionID]*turn{},
 		watchers: map[waggle.SessionID]map[chan waggle.Event]struct{}{},
+		bases:    map[waggle.SessionID]*baseline{},
 	}
 }
 
@@ -117,6 +119,13 @@ func (e *Engine) Send(ctx context.Context, id waggle.SessionID, msg string) erro
 	e.state[id] = hive.StateWorking
 	e.mu.Unlock()
 
+	// The baseline must exist before the brain can touch a file: diff
+	// and undo are promises made at the first turn, not at review time.
+	if _, err := e.ensureBaseline(ctx, id); err != nil {
+		e.setState(id, hive.StateDied)
+		return err
+	}
+
 	e.append(waggle.Event{Sess: id, Bee: "human", Kind: waggle.KindMessage, At: time.Now(), Data: waggle.Enc(waggle.Message{Text: msg})})
 
 	if m.Title == "" {
@@ -160,6 +169,16 @@ func (e *Engine) pump(id waggle.SessionID, m journal.Meta, t *turn) {
 				// and re-bill the whole history as uncached input.
 				m.Resume = sp.Resume
 				_ = e.Journal.SaveMeta(m)
+			}
+		case waggle.KindEdit:
+			var ed waggle.Edit
+			if err := decode(ev.Data, &ed); err == nil {
+				// Copy-on-write and touched-file records must land
+				// before the event reaches any watcher, so a client that
+				// saw the edit can trust the baseline already covers it.
+				for _, warn := range e.observeEdit(id, ed) {
+					e.append(warn)
+				}
 			}
 		case waggle.KindDied:
 			final = hive.StateDied
