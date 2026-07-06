@@ -45,8 +45,9 @@ type Engine struct {
 // turn is one in-flight run: its stream plus a channel that closes when
 // the pump has fully drained it.
 type turn struct {
-	stream adapter.Stream
-	done   chan struct{}
+	stream  adapter.Stream // nil until the adapter has started; guarded by Engine.mu
+	stopReq bool           // Stop arrived before the stream existed; guarded by Engine.mu
+	done    chan struct{}
 }
 
 var _ hive.Service = (*Engine)(nil)
@@ -180,12 +181,24 @@ func (e *Engine) Send(ctx context.Context, id waggle.SessionID, msg string) erro
 		return fmt.Errorf("engine: unknown session %s: %w", id, err)
 	}
 	e.ensureSeq(id)
+	// The turn is registered with the busy check, in one lock, before the
+	// adapter starts: two racing Sends cannot both pass, and anyone who
+	// can see the turn's effects can also see the turn, so Stop always
+	// finds it and waits out the pump's tail instead of no-opping early.
+	t := &turn{done: make(chan struct{})}
 	e.mu.Lock()
 	if _, busy := e.running[id]; busy {
 		e.mu.Unlock()
 		return fmt.Errorf("engine: session %s already has a turn running", id)
 	}
+	e.running[id] = t
 	e.mu.Unlock()
+	abort := func() {
+		e.mu.Lock()
+		delete(e.running, id)
+		e.mu.Unlock()
+		close(t.done)
+	}
 
 	if m.Title == "" {
 		// Saved now, not at turn end: session lists and collision
@@ -202,6 +215,7 @@ func (e *Engine) Send(ctx context.Context, id waggle.SessionID, msg string) erro
 		e.wtMu.Lock()
 		if om, busy := e.folderCollision(ctx, id, m.Dir); busy {
 			e.wtMu.Unlock()
+			abort()
 			return &hive.FolderBusyError{With: om.Title}
 		}
 		e.setState(id, hive.StateWorking)
@@ -225,6 +239,7 @@ func (e *Engine) Send(ctx context.Context, id waggle.SessionID, msg string) erro
 	// and undo are promises made at the first turn, not at review time.
 	if _, err := e.ensureBaseline(ctx, id); err != nil {
 		e.setState(id, hive.StateDied)
+		abort()
 		return err
 	}
 
@@ -233,6 +248,7 @@ func (e *Engine) Send(ctx context.Context, id waggle.SessionID, msg string) erro
 	drv, err := adapter.Open(m.Brain)
 	if err != nil {
 		e.setState(id, hive.StateDied)
+		abort()
 		return err
 	}
 	// Turns outlive the caller's ctx: the TUI's Send returns immediately
@@ -240,12 +256,17 @@ func (e *Engine) Send(ctx context.Context, id waggle.SessionID, msg string) erro
 	stream, err := drv.Run(context.Background(), adapter.Session{ID: id, Dir: m.Dir, Resume: m.Resume}, msg)
 	if err != nil {
 		e.setState(id, hive.StateDied)
+		abort()
 		return err
 	}
-	t := &turn{stream: stream, done: make(chan struct{})}
 	e.mu.Lock()
-	e.running[id] = t
+	t.stream = stream
+	stopNow := t.stopReq
 	e.mu.Unlock()
+	if stopNow {
+		// Stop landed while the adapter was still starting up; honor it.
+		_ = stream.Stop(context.Background())
+	}
 
 	go e.pump(id, m, t)
 	return nil
@@ -395,12 +416,19 @@ func (e *Engine) Watch(ctx context.Context, id waggle.SessionID) (<-chan waggle.
 func (e *Engine) Stop(ctx context.Context, id waggle.SessionID) error {
 	e.mu.Lock()
 	t, ok := e.running[id]
-	e.mu.Unlock()
 	if !ok {
+		e.mu.Unlock()
 		return nil
 	}
-	if err := t.stream.Stop(ctx); err != nil {
-		return err
+	// The stream can be nil for the moment between the turn registering
+	// and the adapter starting; the flag makes Send honor the stop then.
+	stream := t.stream
+	t.stopReq = true
+	e.mu.Unlock()
+	if stream != nil {
+		if err := stream.Stop(ctx); err != nil {
+			return err
+		}
 	}
 	select {
 	case <-t.done:

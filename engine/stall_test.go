@@ -24,16 +24,18 @@ func stallEngine(t *testing.T) *Engine {
 	return New(j)
 }
 
-// working fakes a session mid-turn that last spoke ago in the past.
-func working(t *testing.T, e *Engine, id waggle.SessionID, brain string, ago time.Duration) {
+// working fakes a codex session mid-turn that has been silent for ten
+// minutes, well past the cold-start 4m N. Tests that need a different
+// silence move e.last themselves.
+func working(t *testing.T, e *Engine, id waggle.SessionID) {
 	t.Helper()
-	if err := e.Journal.SaveMeta(journal.Meta{ID: id, Dir: t.TempDir(), Brain: brain, Created: time.Now(), Updated: time.Now()}); err != nil {
+	if err := e.Journal.SaveMeta(journal.Meta{ID: id, Dir: t.TempDir(), Brain: "codex", Created: time.Now(), Updated: time.Now()}); err != nil {
 		t.Fatal(err)
 	}
 	e.mu.Lock()
 	e.state[id] = hive.StateWorking
 	e.running[id] = &turn{done: make(chan struct{})}
-	e.last[id] = time.Now().Add(-ago)
+	e.last[id] = time.Now().Add(-10 * time.Minute)
 	e.mu.Unlock()
 }
 
@@ -54,7 +56,7 @@ func find(t *testing.T, e *Engine, id waggle.SessionID) hive.SessionInfo {
 
 func TestStallRaisesOnThePoll(t *testing.T) {
 	e := stallEngine(t)
-	working(t, e, "quiet", "codex", 10*time.Minute)
+	working(t, e, "quiet")
 
 	s := find(t, e, "quiet")
 	if s.State != hive.StateNeeds || s.Reason != "stall" {
@@ -75,7 +77,7 @@ func TestStallRaisesOnThePoll(t *testing.T) {
 
 func TestStallClockOnlyRunsMidTurn(t *testing.T) {
 	e := stallEngine(t)
-	working(t, e, "s", "codex", 10*time.Minute)
+	working(t, e, "s")
 
 	// Blocked on the human: the wait is the human's, never paged.
 	e.mu.Lock()
@@ -99,7 +101,7 @@ func TestStallClockOnlyRunsMidTurn(t *testing.T) {
 
 func TestBeatHealsAndJournalsNothingItself(t *testing.T) {
 	e := stallEngine(t)
-	working(t, e, "s", "codex", 10*time.Minute)
+	working(t, e, "s")
 	find(t, e, "s") // raise it
 
 	if !e.beat("s", "codex") {
@@ -115,7 +117,7 @@ func TestBeatHealsAndJournalsNothingItself(t *testing.T) {
 
 func TestKeepWaitingDoublesThisTurn(t *testing.T) {
 	e := stallEngine(t)
-	working(t, e, "s", "codex", 10*time.Minute)
+	working(t, e, "s")
 	find(t, e, "s") // raise it
 
 	if err := e.KeepWaiting(t.Context(), "s"); err != nil {
