@@ -319,6 +319,8 @@ func init() {
 // writes only after announcing the edit.
 type scriptedTurn struct {
 	t      *testing.T
+	e      *engine.Engine
+	id     waggle.SessionID
 	stream *scriptStream
 	watch  <-chan waggle.Event
 }
@@ -334,7 +336,7 @@ func startScriptedTurn(t *testing.T, e *engine.Engine, id waggle.SessionID) *scr
 	}
 	select {
 	case s := <-scriptStreams:
-		return &scriptedTurn{t: t, stream: s, watch: watch}
+		return &scriptedTurn{t: t, e: e, id: id, stream: s, watch: watch}
 	case <-time.After(5 * time.Second):
 		t.Fatal("adapter never ran")
 		return nil
@@ -359,7 +361,13 @@ func (st *scriptedTurn) edit(status, op, path string) {
 }
 
 func (st *scriptedTurn) finish() {
+	st.t.Helper()
 	close(st.stream.ch)
+	// The pump saves meta after the stream closes; Stop waits that out so
+	// nothing races the test's TempDir cleanup.
+	if err := st.e.Stop(context.Background(), st.id); err != nil {
+		st.t.Fatal(err)
+	}
 }
 
 func TestRestoreByteIdenticalNonGit(t *testing.T) {
@@ -458,6 +466,67 @@ func TestRestoreByteIdenticalNonGit(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "made")); !os.IsNotExist(err) {
 		t.Error("directory created for made/new.txt should be pruned after undo")
+	}
+}
+
+func TestEditPathsThroughSymlinkedRoot(t *testing.T) {
+	// Agents report kernel-resolved paths while the session keeps the
+	// spelling it started from; on macOS a temp folder is /var/... to the
+	// shell and /private/var/... to codex. The baseline must still match
+	// them up, or every edit silently misses the manifest.
+	realDir := t.TempDir()
+	alias := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(realDir, alias); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(realDir, "notes.txt"), []byte("alpha\n"), 0o644)
+	resolvedRoot, err := filepath.EvalSymlinks(realDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	e := newEngine(t)
+	info, err := e.Open(t.Context(), "", alias, "scripted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := startScriptedTurn(t, e, info.ID)
+	st.edit("in_progress", "update", filepath.Join(resolvedRoot, "notes.txt"))
+	appendTo(t, filepath.Join(realDir, "notes.txt"), "agent\n")
+	st.edit("completed", "update", filepath.Join(resolvedRoot, "notes.txt"))
+	st.edit("in_progress", "add", filepath.Join(resolvedRoot, "hello.sh"))
+	write(t, filepath.Join(realDir, "hello.sh"), []byte("#!/bin/sh\necho hi\n"), 0o755)
+	st.edit("completed", "add", filepath.Join(resolvedRoot, "hello.sh"))
+	st.finish()
+
+	diffs, err := e.Changes(t.Context(), info.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, d := range diffs {
+		got[d.Path] = d.Status
+	}
+	if got["notes.txt"] != "M" || got["hello.sh"] != "A" {
+		t.Fatalf("edits through the resolved path missed the diff: %+v", diffs)
+	}
+
+	rep, err := e.RestoreAll(context.Background(), info.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Skipped) != 0 {
+		t.Fatalf("nothing should be skipped, got %+v", rep.Skipped)
+	}
+	data, err := os.ReadFile(filepath.Join(realDir, "notes.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "alpha\n" {
+		t.Errorf("undo not byte-identical: %q", data)
+	}
+	if _, err := os.Stat(filepath.Join(realDir, "hello.sh")); !os.IsNotExist(err) {
+		t.Error("hello.sh should be gone after undo")
 	}
 }
 
