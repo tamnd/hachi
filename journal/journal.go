@@ -31,6 +31,11 @@ type Meta struct {
 	Resume  string           `json:"resume,omitempty"`
 	Created time.Time        `json:"created"`
 	Updated time.Time        `json:"updated"`
+
+	// Worktree mode: set when same-repo concurrency moved this session
+	// into a private copy before its first turn. Empty when in place.
+	WorktreePath   string `json:"worktree_path,omitempty"`
+	WorktreeBranch string `json:"worktree_branch,omitempty"`
 }
 
 // Files is the file-backed Journal rooted at a .hive directory.

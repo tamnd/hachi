@@ -49,7 +49,10 @@ func (m *model) openReview() (tea.Model, tea.Cmd) {
 	}
 	m.layout()
 	m.renderReview()
-	return m, m.loadDiff() // a fresh set; the diff screen's copy may be stale
+	// The diff is always a fresh set, and the session info rides along:
+	// the first turn may have moved this session into a worktree, and
+	// the header needs the branch the open-time copy never saw.
+	return m, tea.Batch(m.loadDiff(), m.refreshInfo())
 }
 
 // reviewCmds — each verb is one Service call in a tea.Cmd.
@@ -457,7 +460,13 @@ func (m *model) viewReview() string {
 	if title == "" {
 		title = "this session"
 	}
-	header := " " + m.th.Title.Render("review") + m.th.Faint.Render("  ──  "+truncate(title, m.w/3)+"  ──  ") + meta
+	mid := truncate(title, m.w/3)
+	if m.sess.Branch != "" {
+		// The private copy shows itself here first: which branch holds
+		// the work, and that it grew from the last commit, not the tree.
+		mid += "  ──  on branch " + m.sess.Branch + ", separate copy, started from your last commit"
+	}
+	header := " " + m.th.Title.Render("review") + m.th.Faint.Render("  ──  "+mid+"  ──  ") + meta
 
 	bodyH := m.h - 3
 	if bodyH < 1 {

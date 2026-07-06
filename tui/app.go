@@ -178,6 +178,7 @@ type openedMsg struct {
 	send  string // message to send once the session is applied (draft flow)
 }
 type sentMsg struct{ id waggle.SessionID }
+type infoMsg struct{ info hive.SessionInfo }
 type stoppedMsg struct{ id waggle.SessionID }
 type tickMsg time.Time
 
@@ -226,6 +227,23 @@ func (m *model) openSession(id waggle.SessionID, send string) tea.Cmd {
 			return errMsg{err: err}
 		}
 		return openedMsg{info: info, watch: ch, stop: stop, send: send}
+	}
+}
+
+// refreshInfo re-reads the focused session's info. The engine can change
+// it after open: the first turn in a busy repo moves the session into a
+// worktree, and the review header wants that branch.
+func (m *model) refreshInfo() tea.Cmd {
+	id := m.sess.ID
+	if id == "" {
+		return nil
+	}
+	return func() tea.Msg {
+		info, err := m.svc.Open(context.Background(), id, "", "")
+		if err != nil {
+			return nil
+		}
+		return infoMsg{info: info}
 	}
 }
 
@@ -329,6 +347,15 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.ticking = true
 		return m, tick()
+
+	case infoMsg:
+		if v := m.viewOf(msg.info.ID); v != nil {
+			v.sess = msg.info
+			if m.screen == screenReview && v == m.sview {
+				m.renderReview()
+			}
+		}
+		return m, nil
 
 	case stoppedMsg:
 		v := m.viewOf(msg.id)
@@ -919,8 +946,14 @@ func (m *model) viewList() string {
 		if title == "" {
 			title = "(untitled)"
 		}
+		detail := s.Updated.Format("Jan 2 15:04")
+		if s.Branch != "" {
+			// A worktree session names its branch here, so git branch
+			// never shows the user one hachi did not mention.
+			detail = s.Branch + " · " + detail
+		}
 		row := fmt.Sprintf("%s  %s  %s", stateDot(m.th, s.State), truncate(title, m.w-30),
-			m.th.Faint.Render(s.Updated.Format("Jan 2 15:04")))
+			m.th.Faint.Render(detail))
 		if i == m.cursor {
 			row = m.th.ListSel.Render("→ ") + row
 		} else {

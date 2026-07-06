@@ -26,7 +26,7 @@ type fakeSvc struct {
 
 func (f *fakeSvc) Sessions(context.Context) ([]hive.SessionInfo, error) { return nil, nil }
 func (f *fakeSvc) Open(_ context.Context, id waggle.SessionID, dir, brain string) (hive.SessionInfo, error) {
-	return hive.SessionInfo{ID: "s1", Dir: dir, Brain: brain, InRepo: !f.nonGit}, nil
+	return hive.SessionInfo{ID: "s1", Title: "make a mess", Dir: dir, Brain: brain, InRepo: !f.nonGit}, nil
 }
 func (f *fakeSvc) Send(context.Context, waggle.SessionID, string) error { return nil }
 func (f *fakeSvc) Watch(context.Context, waggle.SessionID) (<-chan waggle.Event, error) {
