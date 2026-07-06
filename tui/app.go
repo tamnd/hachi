@@ -93,6 +93,15 @@ type model struct {
 	rvTA      textarea.Model
 	reqBanner string // composer banner after request-changes
 	reqDiff   string // diff text riding along with the next message
+
+	// sentence view: the same review state in plain words
+	rvPlain   bool     // sentence rendering active
+	rvChose   bool     // the user toggled views; stop re-defaulting on open
+	rvBtn     int      // 0 keep, 1 undo
+	rvAskKeep bool     // non-git keep confirm pending
+	rvKeep    []string // paths behind the pending keep; nil is everything
+	rvNote    string   // one-shot suffix for the next staged status
+	keptOnce  bool     // the narrows-undo sentence already ran this session
 }
 
 func newModel(svc hive.Service, opts Options) *model {

@@ -40,7 +40,13 @@ func (m *model) openReview() (tea.Model, tea.Cmd) {
 	m.screen = screenReview
 	m.rvSel, m.rvFocus, m.rvDraft = 0, false, false
 	m.rvConfirm, m.rvStatus = "", ""
+	m.rvAskKeep, m.rvKeep, m.rvBtn = false, nil, 0
 	m.rvGone = map[string]bool{}
+	if !m.rvChose {
+		// Outside a git repo the sentence view is the default; a session
+		// in a repo lands on the file tree. The user's own toggle wins.
+		m.rvPlain = !m.sess.InRepo
+	}
 	m.layout()
 	m.renderReview()
 	return m, m.loadDiff() // a fresh set; the diff screen's copy may be stale
@@ -92,7 +98,18 @@ func (m *model) applyStaged(msg stagedMsg) tea.Cmd {
 		m.rvStatus = "× " + msg.err.Error()
 		return nil
 	}
-	m.rvStatus = countLine(len(msg.paths), "staged")
+	// The same verb wears different words per audience: "staged" is git
+	// truth in the tree view, "kept" is what actually happened everywhere
+	// the word stage would be jargon.
+	verb := "staged"
+	if m.rvPlain || !m.sess.InRepo {
+		verb = "kept"
+	}
+	m.rvStatus = countLine(len(msg.paths), verb)
+	if m.rvNote != "" {
+		m.rvStatus += " · " + m.rvNote
+		m.rvNote = ""
+	}
 	return m.loadDiff()
 }
 
@@ -175,6 +192,12 @@ func (m *model) keyReview(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.rvConfirm != "" {
 		return m.keyConfirm(msg)
 	}
+	if m.rvAskKeep {
+		return m.keyKeepConfirm(msg)
+	}
+	if m.rvPlain {
+		return m.keySentence(msg)
+	}
 	switch msg.String() {
 	case "ctrl+c":
 		if m.cancel != nil {
@@ -215,10 +238,19 @@ func (m *model) keyReview(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "a":
 		if f, ok := m.rvFile(); ok {
-			return m, m.stage([]string{f.Path})
+			return m, m.keep([]string{f.Path})
 		}
-		return m, m.stage(nil)
+		return m, m.keep(nil)
+	case "s":
+		m.rvPlain, m.rvChose = true, true
+		return m, nil
 	case "A":
+		if !m.sess.InRepo {
+			// A degrades to a plus a note: there is nothing to commit
+			// to, the kept files just stay in place.
+			m.rvNote = "this folder is not a git repo, changes are kept in place"
+			return m, m.keep(nil)
+		}
 		// Stage everything, then the draft; commit only ever happens
 		// from inside the draft editor.
 		return m, m.stageAndDraft()
@@ -256,6 +288,28 @@ func (m *model) keyConfirm(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, m.restore(nil)
 		}
 		return m, m.restore([]string{target})
+	}
+	return m, nil
+}
+
+// keep is a with one wrinkle: outside a git repo, keeping is the one
+// action that narrows Undo, so the first one asks in a sentence before
+// it runs. In a repo, staging narrows nothing and runs straight away.
+func (m *model) keep(paths []string) tea.Cmd {
+	if !m.sess.InRepo && !m.keptOnce {
+		m.rvAskKeep, m.rvKeep = true, paths
+		return nil
+	}
+	return m.stage(paths)
+}
+
+func (m *model) keyKeepConfirm(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	paths := m.rvKeep
+	m.rvAskKeep, m.rvKeep = false, nil
+	switch msg.String() {
+	case "y", "Y", "enter":
+		m.keptOnce = true
+		return m, m.stage(paths)
 	}
 	return m, nil
 }
@@ -380,6 +434,9 @@ func (m *model) rvMarker(f hive.FileDiff) string {
 }
 
 func (m *model) viewReview() string {
+	if m.rvPlain {
+		return m.viewSentence()
+	}
 	staged := 0
 	for _, f := range m.diff {
 		if f.Staged {
@@ -462,6 +519,9 @@ func (m *model) viewDraft(height int) string {
 }
 
 func (m *model) viewReviewFooter() string {
+	if m.rvAskKeep {
+		return " " + m.th.ToolBad.Render(m.keepQuestion())
+	}
 	if m.rvConfirm != "" {
 		q := "Undo everything this session did? y/n"
 		if m.rvConfirm != "*" {
@@ -477,6 +537,7 @@ func (m *model) viewReviewFooter() string {
 		m.th.StatusKey.Render("d") + m.th.Faint.Render(" restore · ") +
 		m.th.StatusKey.Render("u") + m.th.Faint.Render(" undo all · ") +
 		m.th.StatusKey.Render("r") + m.th.Faint.Render(" request changes · ") +
+		m.th.StatusKey.Render("s") + m.th.Faint.Render(" plain summary · ") +
 		m.th.StatusKey.Render("q") + m.th.Faint.Render(" back")
 	if m.rvStatus != "" {
 		status := m.rvStatus
