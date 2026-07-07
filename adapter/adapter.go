@@ -113,6 +113,33 @@ func Names() []string {
 	return out
 }
 
+// Diagnosis pairs a driver with why it is unusable; a nil Err means it
+// is ready to run.
+type Diagnosis struct {
+	Info Info
+	Err  error
+}
+
+// Doctor probes every registered driver the way Detect does, but keeps
+// the error instead of dropping the driver: Detect says usable or not,
+// hachi doctor explains.
+func Doctor() []Diagnosis {
+	mu.RLock()
+	defer mu.RUnlock()
+	out := make([]Diagnosis, 0, len(drivers))
+	for _, d := range drivers {
+		a, err := d.factory()
+		if err == nil {
+			if det, ok := a.(Detector); ok {
+				err = det.Detect()
+			}
+		}
+		out = append(out, Diagnosis{Info: d.info, Err: err})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Info.Name < out[j].Info.Name })
+	return out
+}
+
 // Detect returns the subset of registered drivers whose backing tools are
 // usable right now, sorted by name.
 func Detect() []Info {

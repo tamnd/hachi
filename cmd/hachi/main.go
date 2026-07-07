@@ -49,6 +49,7 @@ func main() {
 		},
 	}
 	root.AddCommand(brains)
+	root.AddCommand(doctorCmd())
 
 	if err := fang.Execute(context.Background(), root, fang.WithVersion(version)); err != nil {
 		os.Exit(1)
@@ -74,15 +75,9 @@ func run(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("no agent found; install codex (https://github.com/openai/codex) or pass --brain")
 	}
 
-	// HACHI_HOME points the hive somewhere else; demos and gates run on a
-	// throwaway one so the real journal never sees test sessions.
-	hive := os.Getenv("HACHI_HOME")
-	if hive == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return err
-		}
-		hive = filepath.Join(home, ".hachi")
+	hive, err := hiveHome()
+	if err != nil {
+		return err
 	}
 	j, err := journal.NewFiles(hive)
 	if err != nil {
@@ -91,4 +86,18 @@ func run(cmd *cobra.Command, args []string) error {
 	defer func() { _ = j.Close() }()
 
 	return tui.Run(engine.New(j), tui.Options{Dir: dir, Brain: brain, Brains: adapter.Names()})
+}
+
+// hiveHome resolves where the journal lives. HACHI_HOME points the hive
+// somewhere else; demos and gates run on a throwaway one so the real
+// journal never sees test sessions.
+func hiveHome() (string, error) {
+	if h := os.Getenv("HACHI_HOME"); h != "" {
+		return h, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".hachi"), nil
 }
