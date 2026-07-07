@@ -36,6 +36,9 @@ type theme struct {
 	ListBox   lipgloss.Style
 	ListSel   lipgloss.Style
 	Logo      lipgloss.Style
+	BoardCard lipgloss.Style
+	BoardNeed lipgloss.Style
+	BoardSel  lipgloss.Style
 }
 
 func newTheme(dark bool) theme {
@@ -77,5 +80,8 @@ func newTheme(dark bool) theme {
 		ListBox:   lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(box).Padding(1, 2),
 		ListSel:   lipgloss.NewStyle().Foreground(honey).Bold(true),
 		Logo:      lipgloss.NewStyle().Foreground(honey).Bold(true),
+		BoardCard: lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(box).Padding(0, 1),
+		BoardNeed: lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(bad).Padding(0, 1),
+		BoardSel:  lipgloss.NewStyle().Border(lipgloss.ThickBorder()).BorderForeground(honey).Padding(0, 1),
 	}
 }

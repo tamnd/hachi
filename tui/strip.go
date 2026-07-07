@@ -105,26 +105,13 @@ func (m *model) stripRows() int {
 // highest-priority reason among sessions elsewhere, oldest raise first
 // within a rank. Questions outrank deaths outrank waiting diffs.
 func (m *model) topNeed() (title, detail string) {
-	rank := func(r string) int {
-		switch r {
-		case "question":
-			return 0
-		case "died":
-			return 1
-		case "stall":
-			return 2
-		case "diff":
-			return 3
-		}
-		return 4
-	}
 	best := -1
 	for i, s := range m.sessions {
 		if s.ID == m.sess.ID || (s.State != hive.StateNeeds && s.State != hive.StateDied) {
 			continue
 		}
-		if best == -1 || rank(s.Reason) < rank(m.sessions[best].Reason) ||
-			(rank(s.Reason) == rank(m.sessions[best].Reason) && s.Raised.Before(m.sessions[best].Raised)) {
+		if best == -1 || needRank(s.Reason) < needRank(m.sessions[best].Reason) ||
+			(needRank(s.Reason) == needRank(m.sessions[best].Reason) && s.Raised.Before(m.sessions[best].Raised)) {
 			best = i
 		}
 	}
