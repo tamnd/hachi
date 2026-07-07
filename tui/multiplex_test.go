@@ -15,10 +15,12 @@ import (
 // so a test can prove that switching back to an open session never
 // replays, and it records every Send.
 type muxSvc struct {
-	watches int
-	opened  int
-	waits   int
-	sent    []string
+	watches    int
+	opened     int
+	waits      int
+	sent       []string
+	deleted    []waggle.SessionID
+	deleteKept string // the sentence Delete answers with
 }
 
 func (f *muxSvc) Sessions(context.Context) ([]hive.SessionInfo, error) { return nil, nil }
@@ -61,6 +63,10 @@ func (f *muxSvc) KeepWaiting(context.Context, waggle.SessionID) error {
 }
 func (f *muxSvc) MergeBack(context.Context, waggle.SessionID) (hive.MergeReport, error) {
 	return hive.MergeReport{}, nil
+}
+func (f *muxSvc) Delete(_ context.Context, id waggle.SessionID) (string, error) {
+	f.deleted = append(f.deleted, id)
+	return f.deleteKept, nil
 }
 
 // openView injects an opened session the way openedMsg would, without

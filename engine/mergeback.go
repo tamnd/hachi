@@ -105,6 +105,7 @@ func (e *Engine) MergeBack(ctx context.Context, id waggle.SessionID) (hive.Merge
 			dir = filepath.Join(root, rel)
 		}
 		m.Dir, m.WorktreePath, m.WorktreeBranch = dir, "", ""
+		m.Committed = false
 		m.Updated = time.Now()
 		if err := e.Journal.SaveMeta(m); err != nil {
 			return rep, err

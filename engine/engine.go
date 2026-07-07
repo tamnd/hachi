@@ -94,7 +94,7 @@ func (e *Engine) Sessions(ctx context.Context) ([]hive.SessionInfo, error) {
 			ID: m.ID, Title: m.Title, Dir: m.Dir, Brain: m.Brain,
 			State: st, Created: m.Created, Updated: m.Updated,
 			InRepo: inRepo(m.Dir), Branch: m.WorktreeBranch,
-			DiffReady: e.dirty[m.ID],
+			DiffReady: e.dirty[m.ID], Committed: m.Committed,
 		}
 		fillAttention(&info, e.attn[m.ID])
 		out = append(out, info)
@@ -151,7 +151,7 @@ func (e *Engine) info(m journal.Meta) hive.SessionInfo {
 	if !ok {
 		st = hive.StateIdle
 	}
-	info := hive.SessionInfo{ID: m.ID, Title: m.Title, Dir: m.Dir, Brain: m.Brain, State: st, Created: m.Created, Updated: m.Updated, InRepo: inRepo(m.Dir), Branch: m.WorktreeBranch, DiffReady: dirty}
+	info := hive.SessionInfo{ID: m.ID, Title: m.Title, Dir: m.Dir, Brain: m.Brain, State: st, Created: m.Created, Updated: m.Updated, InRepo: inRepo(m.Dir), Branch: m.WorktreeBranch, DiffReady: dirty, Committed: m.Committed}
 	fillAttention(&info, a)
 	return info
 }

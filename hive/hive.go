@@ -53,6 +53,11 @@ type SessionInfo struct {
 	// or undone.
 	DiffReady bool
 
+	// Committed says the session's work has been committed and not yet
+	// merged back; with a Branch set, lists and cards word it as
+	// "committed on hachi/<slug>". Merge-back cleanup clears it.
+	Committed bool
+
 	// Reason says why the session needs a human, when it does: "question"
 	// for an unanswered ask, "diff" for a finished run whose changes
 	// nobody has looked at, "stall" for a run quiet longer than its brain
@@ -168,4 +173,11 @@ type Service interface {
 	// success removes the worktree and deletes the branch. It never
 	// touches the user's own uncommitted work.
 	MergeBack(ctx context.Context, id waggle.SessionID) (MergeReport, error)
+	// Delete removes a session for good: a running turn is stopped
+	// first, then the journal directory, the baseline ref, and the
+	// private worktree all go. There is no soft-delete state. A branch
+	// holding commits that live nowhere else survives, because those
+	// are the user's work; the returned sentence names it, and is empty
+	// when nothing was left behind.
+	Delete(ctx context.Context, id waggle.SessionID) (string, error)
 }
