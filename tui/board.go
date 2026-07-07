@@ -99,6 +99,10 @@ func (m *model) openBoard() tea.Cmd {
 }
 
 func (m *model) keyBoard(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	if m.delAsk != "" {
+		return m.keyDeleteAsk(msg)
+	}
+	m.note = ""
 	cols := m.boardColumns()
 	clamp := func() {
 		if m.bdRow >= len(cols[m.bdCol]) {
@@ -139,6 +143,11 @@ func (m *model) keyBoard(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "n", "ctrl+n":
 		return m, m.startDraft()
+	case "x":
+		if m.bdRow < len(cols[m.bdCol]) {
+			m.delAsk = cols[m.bdCol][m.bdRow].ID
+		}
+		return m, nil
 	case "enter":
 		if m.bdRow >= len(cols[m.bdCol]) {
 			return m, nil
@@ -237,9 +246,16 @@ func (m *model) viewBoardNarrow(cols [4][]hive.SessionInfo) string {
 }
 
 func (m *model) boardFooter() string {
+	if m.delAsk != "" {
+		return " " + m.th.ToolBad.Render(m.deleteAskLine())
+	}
+	if m.note != "" {
+		return " " + m.th.Faint.Render(m.note)
+	}
 	return " " + m.th.StatusKey.Render("h/l") + m.th.Faint.Render(" column · ") +
 		m.th.StatusKey.Render("j/k") + m.th.Faint.Render(" card · ") +
 		m.th.StatusKey.Render("enter") + m.th.Faint.Render(" open · ") +
+		m.th.StatusKey.Render("x") + m.th.Faint.Render(" delete · ") +
 		m.th.StatusKey.Render("ctrl+n") + m.th.Faint.Render(" new · ") +
 		m.th.StatusKey.Render("tab") + m.th.Faint.Render(" back")
 }
@@ -299,6 +315,8 @@ func (m *model) lastAction(s hive.SessionInfo) string {
 		return "stopped"
 	case s.DiffReady:
 		return "changes to review"
+	case s.Committed && s.Branch != "":
+		return "committed on " + s.Branch
 	}
 	return "no changes"
 }

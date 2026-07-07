@@ -41,6 +41,7 @@ func (f *fakeSvc) MergeBack(context.Context, waggle.SessionID) (hive.MergeReport
 	f.merges++
 	return f.mergeRep, nil
 }
+func (f *fakeSvc) Delete(context.Context, waggle.SessionID) (string, error) { return "", nil }
 func (f *fakeSvc) Watch(context.Context, waggle.SessionID) (<-chan waggle.Event, error) {
 	return nil, nil
 }

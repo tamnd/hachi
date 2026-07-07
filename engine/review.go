@@ -262,6 +262,12 @@ func (e *Engine) Commit(ctx context.Context, id waggle.SessionID, message string
 
 	sha, _ := gitOut(ctx, b.meta.Root, "rev-parse", "--short", "HEAD")
 	first := strings.TrimSpace(strings.SplitN(message, "\n", 2)[0])
+	// The commit is now the session's story: the card says "committed on
+	// hachi/<slug>" until merge-back brings it home and clears the mark.
+	if m, err := e.Journal.LoadMeta(id); err == nil && !m.Committed {
+		m.Committed = true
+		_ = e.Journal.SaveMeta(m)
+	}
 	e.ensureSeq(id)
 	e.append(waggle.Event{Sess: id, Bee: "hachi", Kind: waggle.KindFinding, At: time.Now(),
 		Data: waggle.Enc(waggle.Message{Text: fmt.Sprintf("committed %s: %s", sha, first)})})

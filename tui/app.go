@@ -90,6 +90,8 @@ type model struct {
 	// list
 	sessions []hive.SessionInfo
 	cursor   int
+	delAsk   waggle.SessionID // session x asked about; empty when no confirm is up
+	note     string           // one-line outcome under the list or board, next key clears it
 
 	// board: the cursor is its only state; columns derive from sessions
 	bdCol int
@@ -195,6 +197,11 @@ type folderBusyMsg struct {
 	with string // who holds the folder, may be empty
 }
 type queuedMsg struct{ id waggle.SessionID }
+type deletedMsg struct {
+	id   waggle.SessionID
+	kept string // what survived, usually a branch; empty when nothing did
+	err  error
+}
 type infoMsg struct{ info hive.SessionInfo }
 type stoppedMsg struct{ id waggle.SessionID }
 type tickMsg time.Time
@@ -449,6 +456,16 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case restoredMsg:
 		return m, m.applyRestored(msg)
 
+	case deletedMsg:
+		if msg.err != nil {
+			m.note = "delete failed: " + msg.err.Error()
+		} else if msg.kept != "" {
+			m.note = "deleted; " + msg.kept
+		} else {
+			m.note = "deleted"
+		}
+		return m, m.loadSessions()
+
 	case sessionsMsg:
 		m.sessions = msg.list
 		for _, s := range msg.list {
@@ -460,6 +477,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.cursor >= len(m.sessions) {
 			m.cursor = 0
+		}
+		if cols := m.boardColumns(); m.bdRow >= len(cols[m.bdCol]) {
+			// A session can leave a column between polls (deleted, or its
+			// state moved it); the cursor must never point past the end.
+			m.bdRow = max(0, len(cols[m.bdCol])-1)
 		}
 		if on := m.stripVisible(); on != m.stripOn {
 			m.stripOn = on
@@ -615,6 +637,10 @@ func (m *model) keyFolderBusy(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *model) keyList(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	if m.delAsk != "" {
+		return m.keyDeleteAsk(msg)
+	}
+	m.note = ""
 	switch msg.String() {
 	case "ctrl+c", "q", "esc", "ctrl+l":
 		m.screen = screenChat
@@ -633,6 +659,11 @@ func (m *model) keyList(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "n":
 		return m, m.startDraft()
+	case "x":
+		if m.cursor < len(m.sessions) {
+			m.delAsk = m.sessions[m.cursor].ID
+		}
+		return m, nil
 	case "enter":
 		if len(m.sessions) == 0 {
 			return m, nil
@@ -645,6 +676,66 @@ func (m *model) keyList(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, m.openSession(id, "")
 	}
 	return m, nil
+}
+
+// keyDeleteAsk answers the one-line delete confirm: y deletes, anything
+// else is a no. The ask holds only the id; the sentence re-derives from
+// the live list, so a session that resolves itself mid-ask still gets
+// worded right.
+func (m *model) keyDeleteAsk(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	id := m.delAsk
+	m.delAsk = ""
+	switch msg.String() {
+	case "ctrl+c":
+		m.quitAll()
+		return m, tea.Quit
+	case "y", "Y":
+		return m, m.deleteSession(id)
+	}
+	return m, nil
+}
+
+// deleteAskLine is the confirm in one plain sentence. Deleting a working
+// or waiting session says the run stops first, per the board spec.
+func (m *model) deleteAskLine() string {
+	var s hive.SessionInfo
+	for _, x := range m.sessions {
+		if x.ID == m.delAsk {
+			s = x
+		}
+	}
+	title := "this session"
+	if s.Title != "" {
+		title = "\"" + truncate(s.Title, 30) + "\""
+	}
+	q := fmt.Sprintf("delete %s and its whole history?", title)
+	if s.State == hive.StateWorking || s.State == hive.StateNeeds || s.State == hive.StateWaiting {
+		q = fmt.Sprintf("delete %s? the run stops first, then its whole history goes.", title)
+	}
+	return q + " (y/n)"
+}
+
+// deleteSession drops the client side first (watch, view, focus) and
+// asks the engine to remove the rest; the outcome lands as deletedMsg.
+func (m *model) deleteSession(id waggle.SessionID) tea.Cmd {
+	if v, ok := m.open[id]; ok {
+		if v.cancel != nil {
+			v.cancel()
+		}
+		delete(m.open, id)
+		if m.sview == v {
+			if m.scratch == nil {
+				m.scratch = newSview()
+			}
+			m.sview = m.scratch
+			m.layout()
+			m.refresh(true)
+		}
+	}
+	return func() tea.Msg {
+		kept, err := m.svc.Delete(context.Background(), id)
+		return deletedMsg{id: id, kept: kept, err: err}
+	}
 }
 
 // viewOf finds the open view for a session; nil when it was never opened
@@ -1093,8 +1184,14 @@ func (m *model) viewList() string {
 		detail := s.Updated.Format("Jan 2 15:04")
 		if s.Branch != "" {
 			// A worktree session names its branch here, so git branch
-			// never shows the user one hachi did not mention.
-			detail = s.Branch + " · " + detail
+			// never shows the user one hachi did not mention. Once the
+			// work is committed the row says so, the cue that merge-back
+			// is the next move.
+			label := s.Branch
+			if s.Committed {
+				label = "committed on " + s.Branch
+			}
+			detail = label + " · " + detail
 		}
 		if s.State == hive.StateWaiting {
 			detail = "waiting for the folder · " + detail
@@ -1113,7 +1210,14 @@ func (m *model) viewList() string {
 		}
 		b.WriteString(row + "\n")
 	}
-	b.WriteString("\n" + m.th.Faint.Render("enter open · n new · esc back"))
+	switch {
+	case m.delAsk != "":
+		b.WriteString("\n" + m.th.ToolBad.Render(m.deleteAskLine()))
+	case m.note != "":
+		b.WriteString("\n" + m.th.Faint.Render(m.note))
+	default:
+		b.WriteString("\n" + m.th.Faint.Render("enter open · n new · x delete · esc back"))
+	}
 	panel := m.th.ListBox.Render(b.String())
 	return lipgloss.Place(m.w, m.h-m.stripRows(), lipgloss.Center, lipgloss.Center, panel)
 }
