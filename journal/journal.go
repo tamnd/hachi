@@ -32,6 +32,11 @@ type Meta struct {
 	Created time.Time        `json:"created"`
 	Updated time.Time        `json:"updated"`
 
+	// Committed says the session's staged work has been committed and the
+	// commit has not come home yet; merge-back cleanup clears it. Lists
+	// and cards word it as "committed on hachi/<slug>".
+	Committed bool `json:"committed,omitempty"`
+
 	// Worktree mode: set when same-repo concurrency moved this session
 	// into a private copy before its first turn. Empty when in place.
 	WorktreePath   string `json:"worktree_path,omitempty"`
@@ -160,6 +165,19 @@ func (f *Files) List() ([]Meta, error) {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Updated.After(out[j].Updated) })
 	return out, nil
+}
+
+// Delete removes a session from disk: events, meta, baseline, the whole
+// directory. The open handle goes first, so a late append cannot keep
+// writing through a deleted directory entry.
+func (f *Files) Delete(id waggle.SessionID) error {
+	f.mu.Lock()
+	if w, ok := f.open[id]; ok {
+		_ = w.Close()
+		delete(f.open, id)
+	}
+	f.mu.Unlock()
+	return os.RemoveAll(f.dir(id))
 }
 
 // Close releases open file handles.
