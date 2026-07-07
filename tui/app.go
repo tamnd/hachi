@@ -41,6 +41,7 @@ const (
 	screenList
 	screenDiff
 	screenReview
+	screenBoard
 )
 
 // sview is one open session's client-side state: transcript, composer,
@@ -89,6 +90,10 @@ type model struct {
 	// list
 	sessions []hive.SessionInfo
 	cursor   int
+
+	// board: the cursor is its only state; columns derive from sessions
+	bdCol int
+	bdRow int
 
 	// diff-so-far
 	diff        []hive.FileDiff
@@ -506,6 +511,9 @@ func (m *model) key(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.screen == screenReview {
 		return m.keyReview(msg)
 	}
+	if m.screen == screenBoard {
+		return m.keyBoard(msg)
+	}
 	if m.busyAsk != "" {
 		return m.keyFolderBusy(msg)
 	}
@@ -517,6 +525,10 @@ func (m *model) key(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+l":
 		m.screen = screenList
 		return m, m.loadSessions()
+	case "tab":
+		// The board is one key from anywhere, even mid-sentence: a tab
+		// has no business in a chat message.
+		return m, m.openBoard()
 	case "ctrl+n":
 		return m, m.startDraft()
 	case "ctrl+o":
@@ -607,6 +619,8 @@ func (m *model) keyList(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+c", "q", "esc", "ctrl+l":
 		m.screen = screenChat
 		return m, nil
+	case "tab":
+		return m, m.openBoard()
 	case "up", "k":
 		if m.cursor > 0 {
 			m.cursor--
@@ -905,6 +919,8 @@ func (m *model) View() tea.View {
 		content = m.viewDiff()
 	case m.screen == screenReview:
 		content = m.viewReview()
+	case m.screen == screenBoard:
+		content = m.viewBoard()
 	default:
 		content = m.viewChat()
 	}
